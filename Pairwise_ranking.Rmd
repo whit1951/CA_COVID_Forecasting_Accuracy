@@ -1,0 +1,1594 @@
+---
+title: "Pairwise ranking"
+author: "Lauren White (Lauren.White@cdph.ca.gv)"
+date: "2/17/2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Methods
+- Based on pairwise methods from CMU-Delphi repository: https://github.com/cmu-delphi/covid-19-forecast/tree/develop/utilities/weekly_evaluation_notebook
+
+
+## Load forecasting "score card" 
+
+- Produced via `Generate_score_cards.Rmd` for January 1, 2021- February 1, 2022
+- Set dates for alpha, delta, and omicron analysis periods
+
+```{r setup, include=FALSE}
+### Setup + load libraries
+
+library( tidyverse)
+library( lubridate)
+library( stringr)
+library( roll)
+library( knitr)
+library( data.table)
+library( ggthemes)
+library( grid)
+library( gridExtra)
+library( rmarkdown)
+library( scales)
+library( tinytex)
+
+library(covidcast)
+# library(evalcast)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(RColorBrewer)
+library(stringr)
+
+`%notin%` <- Negate(`%in%`)
+
+
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning= FALSE, cache=FALSE, cache.lazy = FALSE)
+# rsconnect::writeManifest()
+
+alpha_start<- as.Date("2021-04-21")
+alpha_end<- as.Date("2021-06-01")
+delta_start<- as.Date("2021-07-21")
+delta_end<- as.Date("2021-09-01")
+omicron_start<- as.Date("2021-12-21")
+omicron_end<- as.Date("2022-02-01")
+
+healthofficer_shortname <- tribble(
+  ~region_short, ~region_acronym, ~region_leon, ~region_long, 
+  "Bay Area",                  "ABAHO",      "Bay Area",     "Association of Bay Area Health Officers (ABAHO)", 
+  "Greater Sacramento Region", "GSRHO", "Greater Sac",  "Greater Sacramento Region Health Officers", 
+  "Northern California",       "RANCHO",     "RANCHO",       "Rural Association of Northern California Health Officers (RANCHO)",
+  "San Joaquin Valley",        "SJVC",       "SJVC",         "San Joaquin Valley Consortium (SJVC)", 
+  "Southern California",       "SCAL",       "SoCal",        "Southern California Health Officers"
+)
+
+ regions <- read_csv( "~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv")%>% 
+    select( county, region_healthofficer , dof_pop_county) %>%
+    rename( region_long=region_healthofficer) %>%
+    left_join( healthofficer_shortname, by = "region_long" ) %>% na.omit()
+
+
+score_cards_tourney <-fread("~/CA_COVID_Forecasting_Accuracy/results/score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv") %>% filter(model %in% c("columbia", "lemma", "m.proj", "covid_nearterm", "simple", "CA-baseline"), geo_value %notin% c("Alpine", "Sierra", "Sutter"), hosp_capacity>25)  %>% mutate(index=as.Date(forecast_date), target_end_date=as.Date(target_end_date)) %>% filter(forecast_date>="2021-02-01", target_end_date <=omicron_end) %>% distinct()
+
+ 
+```
+
+## Scaling by baseline
+
+We scale each score, per location and forecast date, by the ensemble model score; then we take the mean or median. 
+
+Important note on the order of operations here: scale then aggregate. The other
+way around: aggregate then scale, would be a simple post-adjustment applied to
+the metrics we computed earlier. This way: scale then aggregate, results in a 
+different final metric altogether. It is potentially interesting as it provides
+a nonparametric spatiotemporal adjustment; assuming that space and time effects 
+are *multiplicative*, we're directly "canceling them out" by taking ratios. 
+
+```{r, fig.width = 10, fig.height = 10}
+
+scale_df = function(df, var= "ae", base_forecaster = "CA-baseline") {
+  df %>% select(-c(forecast_date)) %>%
+    distinct() %>%
+    pivot_wider(id_cols = c(geo_value, target_end_date, ahead),
+                names_from = "forecaster", names_prefix = var, 
+                values_from = var) %>%
+    mutate(across(starts_with(var), ~ .x /
+                !!as.symbol(paste0(var, base_forecaster)))) %>%
+    pivot_longer(cols = starts_with(var), names_to = "forecaster",
+                 values_to = "scaled") %>%
+    mutate(forecaster = substring(forecaster, nchar(var) + 1)) %>%
+    filter(forecaster != base_forecaster)
+}
+```
+
+## Pairwise tournament
+
+We run a pairwise tournament. This is inspired by Johannes Bracher's analysis
+(and similar ideas in the literature). Except, the order of operations here is
+different: scale then aggregate (whereas Johannes did: aggregate then scale).
+The motivation for this was explained above (thinking of it as providing a 
+nonparametric spatiotemporal adjustment), as was the fact that the order of
+operations really makes a difference.
+
+For each pair of forecasters $f$ and $g$, we compute:
+
+$$
+\theta_{fg} = A\bigg\{ \frac{S(f;\ell,d,a)}{S(g;\ell,d,a)} \;:\; \text{common 
+locations $\ell$, forecast dates $d$, and ahead values $a$} \bigg\}
+$$
+
+where $S$ is a score of interest, say WIS, and $A$ is an aggregator of interest,
+say the mean. Important note: we aggregate over *all common locations, dates, 
+and ahead values*, which may differ for each pair $f,g$. To compute an overall
+metric for forecaster $f$, we use:
+
+$$
+\theta_f = \bigg( \prod_g \theta_{fg} \bigg)^{1/F}.
+$$
+
+the geometric mean of all pairwise comparisons of $f$ to other forecasters (here
+$F$ is the total number of forecasters). Another interesting option would be to 
+define $(\theta_f)_{f \in F}$ as the top left singular vector of the matrix 
+$(\theta_{fg})_{f,g \in F}$, which we'll also investigate.
+
+```{r, fig.width = 10, fig.height = 10}
+# Define mean and median functions that deal with missingness well
+Mean = function(x) mean(x, na.rm = TRUE)
+Median = function(x) median(x, na.rm = TRUE)
+
+
+pairwise_tournament = function(df, var, aggr = Mean) {
+  forecasters = unique(df$forecaster)
+  theta_mat = matrix(NA, length(forecasters), length(forecasters))
+  rownames(theta_mat) = colnames(theta_mat) = forecasters
+  for (f in forecasters) {
+    result =  scale_df(df, var, base_forecaster = f) %>% 
+      group_by(forecaster) %>%
+      summarize(v = aggr(scaled))
+    theta_mat[result$forecaster, f] = result$v
+  }
+  
+  # Convert to data frame for convenience with ggplot
+  theta_df = as.data.frame(theta_mat) %>%
+    mutate(Forecaster1 = forecasters) %>%
+    pivot_longer(cols = -Forecaster1, names_to = "Forecaster2",
+                 values_to = "value")
+  
+  # Compute overall metrics two ways: geometric mean, SVD
+  theta_vec1 = exp(rowMeans(log(theta_mat), na.rm = TRUE))
+  # diag(theta_mat) = 1 # so the SVD won't fail; undo it later
+  # theta_vec2 = as.numeric(svd(theta_mat, nu = 1)$u)
+  # names(theta_vec2) = names(theta_vec1)
+  diag(theta_mat) = NA
+  
+  return(list(mat = theta_mat, df = theta_df, vec1 = theta_vec1)) 
+              #vec2 = theta_vec2))
+}
+```
+
+# Results
+
+## 7-day MAE
+
+### Overall Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+theta = pairwise_tournament(score_cards_tourney, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_overall<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Whole time period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_overall<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Whole time period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_overall, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_overall, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+
+#### Compare across counties for all dates
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+# saveRDS(county_rankings, file="county_pairwise_rankings.RDS")
+
+overall_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Whole period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure overall period
+
+```{r}
+overall_col<-cowplot::plot_grid(A_overall, B_overall, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(overall_col, overall_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+### Alpha Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+alpha_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > alpha_start & forecast_date< alpha_end)
+
+theta = pairwise_tournament(alpha_score_cards_tourney, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_alpha<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Alpha period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_alpha<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Alpha period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_alpha, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_alpha, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Counties: Alpha period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))  %>% filter(forecast_date > alpha_start & forecast_date< alpha_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county") %>% na.omit()
+
+alpha_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Alpha period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure Alpha period
+
+```{r}
+alpha_col<-cowplot::plot_grid(A_alpha, B_alpha, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(alpha_col, alpha_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+### Delta Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+delta_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > delta_start & forecast_date< delta_end)
+
+theta = pairwise_tournament(delta_score_cards_tourney, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_delta<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Delta period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_delta<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Delta period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_delta, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_delta, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Counties: Delta period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline")) %>% filter(forecast_date > delta_start & forecast_date< delta_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+
+delta_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Delta period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure Delta period
+
+```{r}
+delta_col<-cowplot::plot_grid(A_delta, B_delta, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(delta_col, delta_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+
+
+### Omicron Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+omicron_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > omicron_start & forecast_date< omicron_end)
+
+theta = pairwise_tournament(omicron_score_cards_tourney, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_omicron<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Omicron period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_omicron<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Omicron period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_omicron, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_omicron, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+
+#### Counties: Omicron period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))  %>% filter(forecast_date > omicron_start & forecast_date< omicron_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_7day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+
+omicron_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Omicron period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+
+#### Panel figure Omicron period
+
+```{r}
+omicron_col<-cowplot::plot_grid(A_omicron, B_omicron, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(omicron_col, omicron_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+
+## 14-days
+
+### Overall Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+theta = pairwise_tournament(score_cards_tourney, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_overall<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Whole time period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_overall<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Whole time period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_overall, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_overall, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Compare across counties for all dates
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+# saveRDS(county_rankings, file="county_pairwise_rankings.RDS")
+
+overall_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2)), size=2) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Whole period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.y = element_text(size=7),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+```
+
+#### Panel figure overall period
+
+```{r}
+overall_col<-cowplot::plot_grid(A_overall, B_overall, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(overall_col, overall_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+### Alpha Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+alpha_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > alpha_start & forecast_date< alpha_end)
+
+theta = pairwise_tournament(alpha_score_cards_tourney, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_alpha<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Alpha period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_alpha<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Alpha period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_alpha, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_alpha, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Counties: Alpha period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))  %>% filter(forecast_date > alpha_start & forecast_date< alpha_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% na.omit() %>% left_join(regions, by="county")
+
+alpha_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Alpha period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure Alpha period
+
+```{r}
+alpha_col<-cowplot::plot_grid(A_alpha, B_alpha, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(alpha_col, alpha_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+### Delta Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+delta_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > delta_start & forecast_date< delta_end)
+
+theta = pairwise_tournament(delta_score_cards_tourney, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_delta<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Delta period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_delta<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Delta period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_delta, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_delta, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Counties: Delta period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline")) %>% filter(forecast_date > delta_start & forecast_date< delta_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+
+delta_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Delta period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure Delta period
+
+```{r}
+delta_col<-cowplot::plot_grid(A_delta, B_delta, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(delta_col, delta_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+
+
+### Omicron Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+omicron_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > omicron_start & forecast_date< omicron_end)
+
+theta = pairwise_tournament(omicron_score_cards_tourney, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_omicron<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Omicron period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_omicron<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Omicron period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_omicron, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_omicron, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+
+#### Counties: Omicron period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))  %>% filter(forecast_date > omicron_start & forecast_date< omicron_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_14day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+
+omicron_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Omicron period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+
+#### Panel figure Omicron period
+
+```{r}
+omicron_col<-cowplot::plot_grid(A_omicron, B_omicron, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(omicron_col, omicron_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+## 21-days
+
+### Overall Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+theta = pairwise_tournament(score_cards_tourney, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_overall<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Whole time period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_overall<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Whole time period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_overall, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_overall, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Compare across counties for all dates
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+# saveRDS(county_rankings, file="county_pairwise_rankings.RDS")
+
+overall_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Whole period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure overall period
+
+```{r}
+overall_col<-cowplot::plot_grid(A_overall, B_overall, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(overall_col, overall_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+### Alpha Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+alpha_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > alpha_start & forecast_date< alpha_end)
+
+theta = pairwise_tournament(alpha_score_cards_tourney, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_alpha<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Alpha period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_alpha<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Alpha period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_alpha, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_alpha, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Counties: Alpha period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))  %>% filter(forecast_date > alpha_start & forecast_date< alpha_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county") %>% na.omit()
+
+alpha_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Alpha period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure Alpha period
+
+```{r}
+alpha_col<-cowplot::plot_grid(A_alpha, B_alpha, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(alpha_col, alpha_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+### Delta Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+delta_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > delta_start & forecast_date< delta_end)
+
+theta = pairwise_tournament(delta_score_cards_tourney, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_delta<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Delta period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_delta<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Delta period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_delta, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_delta, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+#### Counties: Delta period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline")) %>% filter(forecast_date > delta_start & forecast_date< delta_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+
+delta_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Delta period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+#### Panel figure Delta period
+
+```{r}
+delta_col<-cowplot::plot_grid(A_delta, B_delta, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(delta_col, delta_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+
+
+### Omicron Rankings
+
+```{r, fig.width = 10, fig.height = 10}
+omicron_score_cards_tourney <- score_cards_tourney %>% filter(forecast_date > omicron_start & forecast_date< omicron_end)
+
+theta = pairwise_tournament(omicron_score_cards_tourney, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+ranked_list = rownames(theta$mat)[order(theta$vec1)]
+theta$df<- theta$df %>% mutate(log_ranks = log(value, base= 10))
+
+colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+B_omicron<- ggplot(theta$df, aes(x = factor(Forecaster2, levels = rev(ranked_list)),
+                     y = factor(Forecaster1, levels = rev(ranked_list)))) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(value, 3))) +
+  # scale_fill_gradientn(colours = colors) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    midpoint=0)+
+#    midpoint = mean(range(theta$df$value, na.rm=TRUE)))+
+  # ggtitle("B: Median pairwise ranking (Omicron period)")+
+  labs(x = NULL, y = NULL) +
+  guides(fill="none")+
+  theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Overall metric (computed via GM of pairwise metrics):
+knitr::kable(data.frame(rank = 1:length(theta$vec1), forecaster = ranked_list,
+                        theta = sort(theta$vec1, na.last=TRUE), row.names = NULL))
+
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1, na.last=TRUE))), ranks=theta$vec1, log_ranks = log(theta$vec1, base= 10), y=0)
+
+A_omicron<-ggplot(overall_ranks, aes(x = forecaster, y=y)) +
+  geom_tile(aes(fill = log_ranks)) +
+  geom_text(aes(label = round(ranks, 3))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("A: Overall ranking (Omicron period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+
+
+grid.newpage()
+blank_height <- 0
+rel_height_lower <- 1.35
+pushViewport(viewport(layout =
+    grid.layout(nrow = 2, ncol = 1,
+      heights = unit(
+        c(1, 3),
+        c("null", "null")),
+      widths = unit(c(1), c("null")))))
+print(A_omicron, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(B_omicron, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+```
+
+
+#### Counties: Omicron period
+
+```{r}
+county_list<-unique(score_cards_tourney$geo_value)
+gg_county_rankings<-list()
+
+county_score_cards_tourney <- score_cards_tourney %>% filter(model %in% c("lemma", "simple", "m.proj", "columbia", "covid_nearterm", "CA-baseline"))  %>% filter(forecast_date > omicron_start & forecast_date< omicron_end)
+
+for(i in county_list)
+{
+  score_cards_tourney_county<- county_score_cards_tourney %>% filter(geo_value==i)
+  
+  theta = pairwise_tournament(score_cards_tourney_county, var = "norm_MAE_21day", aggr = 
+                              function(x) median(x, na.rm = TRUE))
+  
+# ranked_list = rownames(theta$mat)[order(theta$vec1)]
+# colors = colorRampPalette(brewer.pal(n = 6, name = "RdBu"))(30)
+
+overall_ranks<-data.frame(forecaster=factor(names(theta$vec1), levels=names(sort(theta$vec1, na.last=TRUE))), ranks=theta$vec1, county=i)
+gg_county_rankings[[i]]<-overall_ranks
+
+}
+county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(regions, by="county")
+
+omicron_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
+  geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
+  geom_text(aes(label = round(ranks, 2))) +
+  scale_fill_gradient2("",
+    low = "#2166ac",
+    mid = "#f7f7f7",
+    high = "#b2182b",
+    # midpoint = mean(range(overall_ranks$ranks))) +
+   midpoint = 0) +
+  xlab("") +
+  ylab("") +
+  # ggtitle("County rankings (Omicron period)") +
+  theme_classic() +
+  guides(fill="none")+
+  theme(axis.ticks.y = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
+```
+
+
+#### Panel figure Omicron period
+
+```{r}
+omicron_col<-cowplot::plot_grid(A_omicron, B_omicron, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
+cowplot::plot_grid(omicron_col, omicron_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```

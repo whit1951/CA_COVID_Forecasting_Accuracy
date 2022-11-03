@@ -1,0 +1,1547 @@
+---
+title: "County Rankings Analysis"
+author: "Lauren White (Lauren.White@cdph.ca.gv)"
+date: "11/24/2021"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(roll)
+library(knitr)
+library(data.table)
+library(ggthemes)
+library(grid)
+library(gridExtra)
+library(rmarkdown)
+library(readxl)
+library(viridis)
+library(urbnmapr)
+library(viridis)
+library(MetBrewer)
+library(magrittr)
+library(stringr)
+library(readr)
+library(purrr)
+library(glue)
+library(knitr)
+library(ggridges)
+library(caret)
+library(doParallel)
+
+`%notin%` <- Negate(`%in%`)
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning= FALSE, cache=FALSE, cache.lazy = FALSE)
+
+set.seed(998)
+registerDoParallel(cores=8)
+```
+
+## Load regions and spatial FIPS
+```{r load-regions}
+#load health officer regions
+healthofficer_shortname <- tribble(~region_acronym, ~region_long, ~ region_full,
+  "ABAHO",      "Association of Bay Area Health Officers (ABAHO)",  "Association of Bay Area Health Officers (ABAHO)",    
+  "GSRHO",      "Greater Sacramento Region Health Officers", "Greater Sacramento Region Health Officers (GSRHO)",
+  "RANCHO",     "Rural Association of Northern California Health Officers (RANCHO)", "Rural Association of Northern California Health Officers (RANCHO)",
+  "SJVC",       "San Joaquin Valley Consortium (SJVC)", "San Joaquin Valley Consortium (SJVC)",
+  "SCAL",       "Southern California Health Officers", "Southern California Health Officers (SCAL)"
+)
+
+ regions <- read_csv("~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv") %>% 
+    select( county, region_healthofficer , dof_pop_county) %>%
+    rename( region_long=region_healthofficer) %>%
+    left_join( healthofficer_shortname, by = "region_long" ) %>% na.omit()
+
+#load data for spatial plotting
+spdf <- geojsonsf::geojson_sf("~/CA_COVID_Forecasting_Accuracy/data/counties.geojson")
+county_fips<-data.frame(county= spdf$NAME_1, county_fips= spdf$COUNTYFI_1)
+
+
+```
+
+## Standardized color palette and labels for plotting
+```{r}
+MAE_map_col<-viridis_pal()(6)
+# MAE_map_col<-rev(map_col[1:10])
+names(MAE_map_col) <- c("columbia", "covid_nearterm", "m.proj", "lemma", "simple", "CA-baseline")
+gglabels_MAE<-c("columbia"="Columbia", "covid_nearterm"= "COVID Near-Term", "m.proj"="Ensemble", "lemma"="Lemma",   "simple"="Simple Growth", "CA-baseline"="CA-baseline")
+
+forecaster_map_col<-viridis_pal()(6)
+# MAE_map_col<-rev(map_col[1:10])
+names(forecaster_map_col) <- c("Columbia", "COVID Nearterm", "Ensemble", "LEMMA", "Simple Growth", "CA-baseline")
+
+region_col<- met.brewer("Hokusai1", 5)
+names(region_col)<-c("Association of Bay Area Health Officers (ABAHO)", "Greater Sacramento Region Health Officers (GSRHO)", "Rural Association of Northern California Health Officers (RANCHO)", "San Joaquin Valley Consortium (SJVC)", "Southern California Health Officers (SCAL)")   
+                     
+region_col_abr<- met.brewer("Hokusai1", 5)
+names(region_col_abr)<-c("ABAHO", "GSRHO", "RANCHO", "SJVC", "SCAL") 
+
+num_forecasts_col<-met.brewer("Hiroshige", 5)
+                     
+```
+
+
+## Figure 1. Plot hospitalizations and variant prevalence to identify periods of interest
+
+```{r}
+#define start and end dates for analysis period
+alpha_start<- as.Date("2021-04-21")
+alpha_end<- as.Date("2021-06-01")
+delta_start<- as.Date("2021-07-21")
+delta_end<- as.Date("2021-09-01")
+omicron_start<- as.Date("2021-12-21")
+omicron_end<- as.Date("2022-02-01")
+
+variant_dates <- tribble(
+  ~variant_period, ~start_date, ~end_date, 
+  "alpha_frac", alpha_start, alpha_end,
+  "delta_frac", delta_start, delta_end,
+  "omicron_frac", omicron_start, omicron_end
+)
+
+
+#define color palette and labels for variants
+variant_cols <- met.brewer("Greek", 5)
+names(variant_cols) <- c("alpha_frac", "delta_frac", "gamma_frac", 
+ "omicron_frac", "other_frac")
+variant_labels <- c("alpha_frac"= "Alpha", "delta_frac"= "Delta" , "gamma_frac"= "Gamma", 
+ "omicron_frac"="Omicron", "other_frac"="Other")
+
+#actual hospitalizations
+actuals <- fread("~/CA_COVID_Forecasting_Accuracy/data/COVID_hospital_census.csv") %>%  mutate(index = mdy( Most.Recent.Date)) %>% rename(county=County.Name) %>% left_join(regions, by= "county") %>%
+  group_by( index ) %>% select(county, region=region_acronym, index, hospitalized= COVID.19.Positive.Patients)
+
+actuals_state<- actuals %>% group_by( index ) %>% summarize(hospitalized= sum(hospitalized, na.rm=TRUE))
+
+A<-actuals_state %>% filter(index> as.Date("2021-02-01"), index<as.Date("2022-02-01")) %>% ggplot() + geom_line(aes(x=index, y=hospitalized)) + theme_classic()+ xlab("Date")+ ylab("Hospitalization Census")+ 
+   geom_rect(aes(xmin = start_date, xmax = end_date, fill = variant_period), 
+    ymin = -Inf, ymax = Inf, alpha = 0.3, 
+    data = variant_dates)+ 
+  scale_fill_manual(name="Analysis\nPeriod", labels=variant_labels[names(variant_cols) %in% unique(variant_dates$variant_period)], values=variant_cols[names(variant_cols) %in% unique(variant_dates$variant_period)] )
+  
+
+
+
+variants <-  fread("~/CA_COVID_Forecasting_Accuracy/data/region_variants_summary.csv") %>% mutate(index=as.Date(date)) 
+
+variants_state<- variants %>% filter(region== "California", index> as.Date("2021-02-01") & index < as.Date("2022-02-01")) %>% select(index, region, alpha_frac, gamma_frac, omicron_frac, delta_frac, other_frac) %>% pivot_longer(!c(region, index), names_to = "Variant", values_to = "fraction")
+
+B<- variants_state %>% ggplot()+ geom_line(aes(x=index, y=fraction, col=Variant))+ xlab("Date")+ ylab("Variant Prevalence") + theme_classic()+
+  scale_color_manual(values=variant_cols, labels = variant_labels)+
+ #  scale_color_manual(values=met.brewer("Greek", 5), labels = c("alpha_frac"= "Alpha", "delta_frac"= "Delta" , "gamma_frac"= "Gamma", 
+ # "omicron_frac"="Omicron", "other_frac"="Other"))+
+geom_rect(data = variant_dates, aes(xmin = start_date, xmax = end_date, fill = variant_period), ymin = -Inf, ymax = Inf, alpha = 0.3)+  scale_fill_manual(name="Analysis\nPeriod", labels=variant_labels[names(variant_cols) %in% unique(variant_dates$variant_period)], values=variant_cols[names(variant_cols) %in% unique(variant_dates$variant_period)] )+
+  guides(fill="none")
+
+reff_state <- read_csv("~/CA_COVID_Forecasting_Accuracy/data/state_reff.csv") %>%
+  filter(model == "m.rt") %>% mutate( location = "CA", location_level= "state") 
+C<- reff_state %>% filter(index> as.Date("2021-02-01"), index< as.Date("2022-02-01")) %>% ggplot()+ geom_line(aes(x=index, y=estimate))+ geom_hline(yintercept=1, lty="dashed")+ xlab("Date")+ ylab("R-effective Estimate") + theme_classic()+
+  scale_color_manual(values=variant_cols, labels = variant_labels)+
+geom_rect(data = variant_dates, aes(xmin = start_date, xmax = end_date, fill = variant_period), ymin = -Inf, ymax = Inf, alpha = 0.3)+  scale_fill_manual(name="Analysis\nPeriod", labels=variant_labels[names(variant_cols) %in% unique(variant_dates$variant_period)], values=variant_cols[names(variant_cols) %in% unique(variant_dates$variant_period)] )+
+  guides(fill="none")
+
+col_one<- cowplot::plot_grid(A, B, C, labels="AUTO", ncol=1, align="hv", axis="lr")
+
+D<- regions %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = region_full)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Health Officer Regions", values= region_col)+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = guide_legend(title.position="top", nrow = 6)) +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+    legend.position="bottom")
+
+cowplot::plot_grid(col_one, D, labels=c("", "D"), ncol=2, rel_widths=c(2, 1))
+
+```
+
+## Import and Clean Socio-Economic Data Sets
+CA county data sets from: https://www.ers.usda.gov/data-products/county-level-data-sets/
+
+* Poverty (2019): All people in poverty (2019) %
+* Unemployment(annual average 2020 unemployment and 2019 median income latest): Unemployment rate (%) from 2019; Median Household Income
+* Education (2015-2019): 2015-2019 5-yr average percentage completing college (university degree); 2013 Rural-urban Continuum code
+
+
+```{r load-data}
+
+#Socio-economic county-level data
+vx_odp_raw <-read.csv("https://data.chhs.ca.gov/dataset/e283ee5a-cf18-4f20-a92c-ee94a2866ccd/resource/130d7ba2-b6eb-438d-a412-741bde207e1c/download/covid19vaccinesbycounty.csv") #daily vax record
+
+vx <- vx_odp_raw %>% arrange(administered_date, county) %>% mutate(index=as.Date(administered_date)) %>% left_join(regions) %>% 
+  filter(index>=as.Date("2021-01-01"), county %notin% c("All CA and Non-CA Counties", "All CA Counties", "Unknown")) %>% 
+  mutate(perc_COVIDvx= cumulative_fully_vaccinated/dof_pop_county) %>% select(index, county, perc_COVIDvx)
+
+poverty<- read_xlsx("data/PovertyReport.xlsx", skip=4) %>% select(county= Name, RUC_Code=`RUC Code`, perc_pov= `Percent...7`) %>% filter(county!= "California")  
+
+unemploy<-read_xlsx("data/UnemploymentReport.xlsx", skip=2) %>% select(county= Name, perc_unemploy= `2020`, income=`Median Household Income (2019)`) %>% filter(county!= "California") %>% mutate(county = gsub(" County, CA", "", county), county = gsub(" County/city, CA", "", county))  
+
+edu<-read_xlsx("data/EducationReport.xlsx", skip=2) %>% select(county= Name, education=`2015-2019`) %>% filter(county!= "California") %>% mutate(county = gsub(", CA", "", county))    
+
+reff_curve_cnty <- fread("~/CA_COVID_Forecasting_Accuracy/data/cnty_reff.csv") %>%
+     filter(model=="m.rt") %>% select(-model, -archivedt) %>% mutate(index=as.Date(index)) 
+
+reff_dates <- seq(as.Date(as.Date("2021-01-01")), max(reff_curve_cnty$index, na.rm = T), by = "1 day")
+
+reff_change <- bind_rows(lapply(reff_dates, function(t){
+  reff_diff <- reff_curve_cnty %>% filter(index %in% c(t, t - lubridate::days(7))) %>%
+    group_by(county) %>%
+    summarize(low = first(estimate), high = last(estimate)) %>%
+    mutate(diff = high - low, index = t)
+})) %>% select(index, county, diff)
+
+
+```
+
+## 7 days
+
+### Score model performance using fractional ranking
+
+```{r}
+score_cards_tourney <-fread("~/CA_COVID_Forecasting_Accuracy/results/score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv") %>% filter(model %in% c("columbia", "lemma", "m.proj", "covid_nearterm", "simple", "CA-baseline"), geo_value %notin% c("Alpine", "Sierra", "Sutter")) %>% rename(county=geo_value)  %>% mutate(index=as.Date(forecast_date), target_end_date=as.Date(target_end_date)) %>% filter(forecast_date>="2021-02-01", target_end_date <=omicron_end)
+
+#Update MAE definitions here as needed (MAE_7day, MAE_14day, MAE_21day, MAE_28day) and filter by appropriate ahead/delay (e.g., 7, 14, 21, 28)
+delay<-7
+MAE_ranks_long <- score_cards_tourney %>% filter(ahead <=delay) %>% group_by(county, index) %>% select(index, county, model, forecaster, MAE=MAE_7day, norm_MAE=norm_MAE_7day)  %>% distinct() %>% mutate(MAE_rank=dense_rank(desc(-MAE)), norm_MAE_rank=dense_rank(desc(-norm_MAE)))
+
+max_models<-MAE_ranks_long %>% group_by(county, index)  %>% summarize(models_per_day=max(norm_MAE_rank, na.rm=TRUE))
+
+fractional_ranks<- MAE_ranks_long %>% left_join(max_models, by=c("county", "index")) %>% mutate(fraction_rank= 1- (norm_MAE_rank-1)/models_per_day)
+daily_winner<-fractional_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+county_sums<-fractional_ranks %>% group_by(county, model) %>% summarize(county_sum= sum(fraction_rank, na.rm=TRUE))
+county_sums_wide<-county_sums %>% pivot_wider(names_from="model", values_from = "county_sum")
+
+alpha_ranks <- fractional_ranks %>% filter(index > as.Date(alpha_start) & index < as.Date(alpha_end))
+alpha_daily_winner<-alpha_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+alpha_county_by_model <-alpha_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+alpha_winner<- alpha_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+alpha_model_count<- alpha_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+alpha_date_range<-length(unique(alpha_ranks$index))
+num_counties<-length(unique(alpha_ranks$county))
+alpha_model_sum<-alpha_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(alpha_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+
+delta_ranks <- fractional_ranks %>% filter(index > as.Date(delta_start) & index < as.Date(delta_end))
+delta_daily_winner<-delta_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+delta_county_by_model <-delta_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+delta_winner<- delta_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+delta_model_count<- delta_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+delta_date_range<-length(unique(delta_ranks$index))
+num_counties<-length(unique(delta_ranks$county))
+delta_model_sum<-delta_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(delta_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+
+omicron_ranks <- fractional_ranks %>% filter(index > as.Date(omicron_start) & index < as.Date(omicron_end-delay))
+omicron_daily_winner<-omicron_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+omicron_county_by_model <-omicron_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+omicron_winner<- omicron_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+omicron_model_count<- omicron_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+omicron_date_range<-length(unique(omicron_ranks$index))
+num_counties<-length(unique(omicron_ranks$county))
+omicron_model_sum<-omicron_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(omicron_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+```
+
+### Alpha period: Plot maps of best performing models by county 
+
+```{r, fig.height=12}
+
+MAE_map_alpha<-alpha_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist_v2<-alpha_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  # guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-alpha_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  # guides(fill = "none") +
+  theme_classic()
+
+
+MAE_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  # labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+
+col2<- cowplot::plot_grid(MAE_map_alpha, MAE_rankings_alpha, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+alpha_winner %>% ungroup() %>% count(model) %>% kable
+alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+```
+
+
+### Whole Delta period: Plot maps of best performing models by county for 
+
+```{r}
+
+MAE_map_delta<-delta_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist<-delta_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-delta_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  guides(fill = "none") +
+  theme_classic()
+
+
+MAE_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_delta<-delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+
+
+col2<- cowplot::plot_grid(MAE_map_delta, MAE_rankings_delta, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_delta, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+delta_winner %>% ungroup() %>% count(model) %>% kable
+delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+
+```
+
+
+### Omicron: Plot maps of best performing models by count
+
+```{r}
+MAE_map_omicron<-omicron_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist<-omicron_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-omicron_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  guides(fill = "none") +
+  theme_classic()
+
+MAE_heatmap_omicron<-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill=guide_legend(title.position="left", nrow=1))+
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_omicron <-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill=guide_legend(title.position="left", nrow=2))+
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>% drop_na() %>%
+  mutate(med = median(fraction_rank, na.rm=TRUE), avg= mean(fraction_rank, na.rm=TRUE)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~., scale="free")+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ 
+  guides(fill="none")+ 
+  theme(strip.text = element_blank())
+
+# row1<-cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, labels=c("A", "B"), ncol=2, align="hv", axis = "tb")
+# row2<-cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("C", "D"), ncol=2, align="hv", axis = "l")
+# cowplot::plot_grid(row1, row2, ncol=1, align="hv", axis= "tb", rel_heights = c(2.5,1))
+# cowplot::plot_grid(MAE_map_omicron, MAE_hist, ncol=2, axis = "l")
+
+col2<- cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_omicron, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+
+# cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, col2, ncol=3, labels=c("A", "B", ""), axis = "l", rel_widths = c(1,1, .5))
+
+omicron_winner %>% ungroup() %>% count(model) %>% kable
+omicron_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+```
+
+### Number of forecasts participants by date
+
+```{r}
+participants_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  #guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+legend <- cowplot::get_legend(
+  # create some space to the left of the legend
+  participants_heatmap_alpha
+)
+
+participants_heatmap_alpha<- participants_heatmap_alpha+ guides(fill="none")
+
+participants_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("")+
+  guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+participants_heatmap_omicron <-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("")+
+  # guides(fill=guide_legend(title.position="left", nrow=2))+
+   guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "right")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+# cowplot::plot_grid(participants_heatmap_alpha, participants_heatmap_delta, participants_heatmap_omicron, labels="AUTO", ncol=3, align="hv", axis = "tb")
+row1<- cowplot::plot_grid(participants_heatmap_alpha, participants_heatmap_delta, participants_heatmap_omicron, labels="AUTO", ncol=3, align="hv", axis = "tb")
+cowplot::plot_grid(row1, legend, ncol=1, rel_heights=c(3,0.5))
+
+
+```
+
+
+### Train Random Forest Classification
+
+```{r rf-train-7day, echo=FALSE}
+
+MAE_county<-daily_winner %>% left_join(poverty, by= "county") %>% left_join(unemploy, by= "county") %>% left_join(edu, by= "county") %>% left_join(vx, by=c("county", "index")) %>% left_join(regions %>% select(region=region_long, county, dof_pop_county), by="county") %>% left_join(reff_curve_cnty, by=c("index"="index", "county"= "county")) %>%
+  left_join(reff_change, by=c("index", "county")) %>% mutate(county=as.factor(county), RUC_Code=as.factor(RUC_Code), model=as.factor(model), time_since=lubridate::decimal_date(index), delta_up=ifelse(as.Date(index)<as.Date("2021-08-31"), TRUE, FALSE)) %>% rename(pop_size=dof_pop_county, r_eff=estimate) %>% left_join(variants, by=c("index", "region")) %>% na.omit()
+
+MAE_ranks_county<- MAE_ranks_long %>% left_join(poverty, by= "county") %>% left_join(unemploy, by= "county") %>% left_join(edu, by= "county") %>% left_join(vx, by=c("county", "index")) %>% left_join(regions %>% select(region=region_long, county, dof_pop_county), by="county") %>% left_join(reff_curve_cnty, by=c("index"="index", "county"= "county")) %>%
+  left_join(reff_change, by=c("index", "county")) %>% mutate(county=as.factor(county), RUC_Code=as.factor(RUC_Code), model=as.factor(model), time_since=lubridate::decimal_date(index), delta_up=ifelse(as.Date(index)<as.Date("2021-08-31"), TRUE, FALSE)) %>% rename(pop_size=dof_pop_county, r_eff=estimate) %>% left_join(variants, by=c("index", "region")) %>% na.omit()
+
+
+MAE_county <- MAE_county %>% drop_na()
+inTraining <- createDataPartition(MAE_county$model, p = .7, list = FALSE)
+training <- MAE_county[ inTraining,]
+testing  <- MAE_county[-inTraining,]
+
+
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 10,
+                           repeats = 10, allowParallel = TRUE)
+
+rfFit1 <- train(model ~ perc_pov+ perc_unemploy+ income + education + perc_COVIDvx + pop_size + r_eff + alpha_frac + gamma_frac+ omicron_frac + delta_frac + other_frac + diff, data = training, 
+                 method = "rf", 
+                 trControl = fitControl,
+                 verbose = TRUE, preProc = c("center", "scale"))
+rfFit1
+fit1_varImp<-varImp(rfFit1)
+plot(fit1_varImp, main="MAE")
+fit1_varImp
+# predict(rfFit1, newdata = testing)
+
+
+proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Delta variant prevalence", "Population size", "Other variant prevalence",  "Alpha variant prevalence", "Gamma variant prevalence", "Omicron variant prevalence", "Income", "Unemployment (%)", "4-year college degree (%)", "Poverty (%)")
+
+var_imp<-data.frame(proper_names, importance=fit1_varImp$importance[order(fit1_varImp$importance, decreasing=TRUE),])
+
+var_imp_7day<- var_imp %>% ggplot(aes(x = reorder(proper_names, importance), y=importance))+ geom_bar(stat="identity", fill="dark blue")+ theme_classic()+ coord_flip() + xlab("Variable") + ylab("Variable Importance")
+
+```
+
+## 14 days
+
+### Score model performance using fractional ranking
+
+```{r}
+#Update MAE definitions here as needed (MAE_7day, MAE_14day, MAE_21day, MAE_28day) and filter by appropriate ahead/delay (e.g., 7, 14, 21, 28)
+delay<-14
+MAE_ranks_long <- score_cards_tourney %>% filter(ahead <=delay) %>% group_by(county, index) %>% select(index, county, model, forecaster, MAE=MAE_14day, norm_MAE=norm_MAE_14day)  %>% distinct() %>% mutate(MAE_rank=dense_rank(desc(-MAE)), norm_MAE_rank=dense_rank(desc(-norm_MAE)))
+
+max_models<-MAE_ranks_long %>% group_by(county, index)  %>% summarize(models_per_day=max(norm_MAE_rank, na.rm=TRUE))
+
+fractional_ranks<- MAE_ranks_long %>% left_join(max_models, by=c("county", "index")) %>% mutate(fraction_rank= 1- (norm_MAE_rank-1)/models_per_day)
+daily_winner<-fractional_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+county_sums<-fractional_ranks %>% group_by(county, model) %>% summarize(county_sum= sum(fraction_rank, na.rm=TRUE))
+county_sums_wide<-county_sums %>% pivot_wider(names_from="model", values_from = "county_sum")
+
+alpha_ranks <- fractional_ranks %>% filter(index > as.Date(alpha_start) & index < as.Date(alpha_end))
+alpha_daily_winner<-alpha_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+alpha_county_by_model <-alpha_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+alpha_winner<- alpha_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+alpha_model_count<- alpha_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+alpha_date_range<-length(unique(alpha_ranks$index))
+num_counties<-length(unique(alpha_ranks$county))
+alpha_model_sum<-alpha_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(alpha_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+
+delta_ranks <- fractional_ranks %>% filter(index > as.Date(delta_start) & index < as.Date(delta_end))
+delta_daily_winner<-delta_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+delta_county_by_model <-delta_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+delta_winner<- delta_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+delta_model_count<- delta_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+delta_date_range<-length(unique(delta_ranks$index))
+num_counties<-length(unique(delta_ranks$county))
+delta_model_sum<-delta_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(delta_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+
+
+omicron_ranks <- fractional_ranks %>% filter(index > as.Date(omicron_start) & index < as.Date(omicron_end-delay))
+omicron_daily_winner<-omicron_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+omicron_county_by_model <-omicron_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+omicron_winner<- omicron_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+omicron_model_count<- omicron_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+omicron_date_range<-length(unique(omicron_ranks$index))
+num_counties<-length(unique(omicron_ranks$county))
+omicron_model_sum<-omicron_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(omicron_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+
+```
+
+### Alpha period: Plot maps of best performing models by county 
+
+```{r, fig.height=12}
+
+MAE_map_alpha<-alpha_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist_v2<-alpha_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  # guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-alpha_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  # guides(fill = "none") +
+  theme_classic()
+
+
+MAE_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+
+
+#cowplot::plot_grid(MAE_map, MAE_hist, ncol=2, axis = "l")
+# cowplot::plot_grid(map14, day14_hist, ncol=2, axis = "l")
+# cowplot::plot_grid(map28, day28_hist, ncol=2, axis = "l")
+
+col2<- cowplot::plot_grid(MAE_map_alpha, MAE_rankings_alpha, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+alpha_winner %>% ungroup() %>% count(model) %>% kable
+alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+
+```
+
+
+### Whole Delta period: Plot maps of best performing models by county for 
+
+```{r}
+
+MAE_map_delta<-delta_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+#version 1- histogram of winning models by county
+MAE_hist<-delta_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-delta_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  guides(fill = "none") +
+  theme_classic()
+
+
+MAE_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_delta<-delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+
+
+col2<- cowplot::plot_grid(MAE_map_delta, MAE_rankings_delta, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_delta, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+delta_winner %>% ungroup() %>% count(model) %>% kable
+delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+
+```
+
+
+### Omicron: Plot maps of best performing models by count
+
+```{r}
+MAE_map_omicron<-omicron_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist<-omicron_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-omicron_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  guides(fill = "none") +
+  theme_classic()
+
+MAE_heatmap_omicron<-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill=guide_legend(title.position="left", nrow=1))+
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_omicron <-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill=guide_legend(title.position="left", nrow=2))+
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>% drop_na() %>%
+  mutate(med = median(fraction_rank, na.rm=TRUE), avg= mean(fraction_rank, na.rm=TRUE)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~., scale="free")+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ 
+  guides(fill="none")+ 
+  theme(strip.text = element_blank())
+
+# row1<-cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, labels=c("A", "B"), ncol=2, align="hv", axis = "tb")
+# row2<-cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("C", "D"), ncol=2, align="hv", axis = "l")
+# cowplot::plot_grid(row1, row2, ncol=1, align="hv", axis= "tb", rel_heights = c(2.5,1))
+# cowplot::plot_grid(MAE_map_omicron, MAE_hist, ncol=2, axis = "l")
+
+col2<- cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_omicron, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+
+# cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, col2, ncol=3, labels=c("A", "B", ""), axis = "l", rel_widths = c(1,1, .5))
+
+omicron_winner %>% ungroup() %>% count(model) %>% kable
+omicron_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+```
+
+### Number of forecasts participants by date
+
+```{r}
+participants_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  #guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+legend <- cowplot::get_legend(
+  # create some space to the left of the legend
+  participants_heatmap_alpha
+)
+
+participants_heatmap_alpha<- participants_heatmap_alpha+ guides(fill="none")
+
+participants_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("")+
+  guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+participants_heatmap_omicron <-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("")+
+  # guides(fill=guide_legend(title.position="left", nrow=2))+
+   guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "right")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+# cowplot::plot_grid(participants_heatmap_alpha, participants_heatmap_delta, participants_heatmap_omicron, labels="AUTO", ncol=3, align="hv", axis = "tb")
+row1<- cowplot::plot_grid(participants_heatmap_alpha, participants_heatmap_delta, participants_heatmap_omicron, labels="AUTO", ncol=3, align="hv", axis = "tb")
+cowplot::plot_grid(row1, legend, ncol=1, rel_heights=c(3,0.5))
+
+
+```
+
+
+
+
+### Train Random Forest Classification
+
+```{r rf-train-14day, echo=FALSE}
+library(caret)
+library(doParallel)
+
+MAE_county<-daily_winner %>% left_join(poverty, by= "county") %>% left_join(unemploy, by= "county") %>% left_join(edu, by= "county") %>% left_join(vx, by=c("county", "index")) %>% left_join(regions %>% select(region=region_long, county, dof_pop_county), by="county") %>% left_join(reff_curve_cnty, by=c("index"="index", "county"= "county")) %>%
+  left_join(reff_change, by=c("index", "county")) %>% mutate(county=as.factor(county), RUC_Code=as.factor(RUC_Code), model=as.factor(model), time_since=lubridate::decimal_date(index), delta_up=ifelse(as.Date(index)<as.Date("2021-08-31"), TRUE, FALSE)) %>% rename(pop_size=dof_pop_county, r_eff=estimate) %>% left_join(variants, by=c("index", "region")) %>% na.omit()
+
+MAE_ranks_county<- MAE_ranks_long %>% left_join(poverty, by= "county") %>% left_join(unemploy, by= "county") %>% left_join(edu, by= "county") %>% left_join(vx, by=c("county", "index")) %>% left_join(regions %>% select(region=region_long, county, dof_pop_county), by="county") %>% left_join(reff_curve_cnty, by=c("index"="index", "county"= "county")) %>%
+  left_join(reff_change, by=c("index", "county")) %>% mutate(county=as.factor(county), RUC_Code=as.factor(RUC_Code), model=as.factor(model), time_since=lubridate::decimal_date(index), delta_up=ifelse(as.Date(index)<as.Date("2021-08-31"), TRUE, FALSE)) %>% rename(pop_size=dof_pop_county, r_eff=estimate) %>% left_join(variants, by=c("index", "region")) %>% na.omit()
+
+
+MAE_county <- MAE_county %>% drop_na()
+inTraining <- createDataPartition(MAE_county$model, p = .7, list = FALSE)
+training <- MAE_county[ inTraining,]
+testing  <- MAE_county[-inTraining,]
+
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 4,
+                           ## repeated ten times
+                           repeats = 4, allowParallel = TRUE)
+
+rfFit1 <- train(model ~ perc_pov+ perc_unemploy+ income + education + perc_COVIDvx + pop_size + r_eff + alpha_frac + gamma_frac+ omicron_frac + delta_frac + other_frac + diff, data = training, 
+                 method = "rf", 
+                 trControl = fitControl,
+                 verbose = TRUE, preProc = c("center", "scale"))
+rfFit1
+fit1_varImp<-varImp(rfFit1)
+plot(fit1_varImp, main="MAE")
+fit1_varImp
+# predict(rfFit1, newdata = testing)
+
+proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Population size", "Delta variant prevalence", "Other variant prevalence", "Alpha variant prevalence", "Gamma variant prevalence", "Unemployment (%)", "Income",  "4-year college degree (%)", "Omicron variant prevalence", "Poverty (%)")
+
+var_imp<-data.frame(proper_names, importance=fit1_varImp$importance[order(fit1_varImp$importance, decreasing=TRUE),])
+
+var_imp_14day<- var_imp %>% ggplot(aes(x = reorder(proper_names, importance), y=importance))+ geom_bar(stat="identity", fill="dark blue")+ theme_classic()+ coord_flip() + xlab("Variable") + ylab("Variable Importance")
+
+```
+
+## 21 days
+
+### Score model performance using fractional ranking
+
+```{r}
+#Update MAE definitions here as needed (MAE_7day, MAE_14day, MAE_21day, MAE_28day) and filter by appropriate ahead/delay (e.g., 7, 14, 21, 28)
+delay<-21
+MAE_ranks_long <- score_cards_tourney %>% filter(ahead <=delay) %>% group_by(county, index) %>% select(index, county, model, forecaster, MAE=MAE_21day, norm_MAE=norm_MAE_21day)  %>% distinct() %>% mutate(MAE_rank=dense_rank(desc(-MAE)), norm_MAE_rank=dense_rank(desc(-norm_MAE)))
+
+max_models<-MAE_ranks_long %>% group_by(county, index)  %>% summarize(models_per_day=max(norm_MAE_rank, na.rm=TRUE))
+
+fractional_ranks<- MAE_ranks_long %>% left_join(max_models, by=c("county", "index")) %>% mutate(fraction_rank= 1- (norm_MAE_rank-1)/models_per_day)
+daily_winner<-fractional_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+county_sums<-fractional_ranks %>% group_by(county, model) %>% summarize(county_sum= sum(fraction_rank, na.rm=TRUE))
+county_sums_wide<-county_sums %>% pivot_wider(names_from="model", values_from = "county_sum")
+
+alpha_ranks <- fractional_ranks %>% filter(index > as.Date(alpha_start) & index < as.Date(alpha_end))
+alpha_daily_winner<-alpha_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+alpha_county_by_model <-alpha_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+alpha_winner<- alpha_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+alpha_model_count<- alpha_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+alpha_date_range<-length(unique(alpha_ranks$index))
+num_counties<-length(unique(alpha_ranks$county))
+alpha_model_sum<-alpha_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(alpha_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+
+delta_ranks <- fractional_ranks %>% filter(index > as.Date(delta_start) & index < as.Date(delta_end))
+delta_daily_winner<-delta_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+delta_county_by_model <-delta_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+delta_winner<- delta_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+delta_model_count<- delta_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+delta_date_range<-length(unique(delta_ranks$index))
+num_counties<-length(unique(delta_ranks$county))
+delta_model_sum<-delta_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(delta_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+
+omicron_ranks <- fractional_ranks %>% filter(index > as.Date(omicron_start) & index < as.Date(omicron_end-delay))
+omicron_daily_winner<-omicron_ranks %>% group_by(county, index) %>% top_n(n=-1, norm_MAE_rank) %>% select(-norm_MAE_rank)
+omicron_county_by_model <-omicron_ranks %>% group_by(county, model) %>% summarize(sum_fraction=sum(fraction_rank, na.rm=TRUE))
+omicron_winner<- omicron_county_by_model %>% top_n(n=1, sum_fraction) %>% select(-sum_fraction)
+omicron_model_count<- omicron_ranks %>% na.omit() %>% group_by(model)%>% summarize(model_count=n())
+omicron_date_range<-length(unique(omicron_ranks$index))
+num_counties<-length(unique(omicron_ranks$county))
+omicron_model_sum<-omicron_ranks %>% group_by(model) %>% summarize(fraction_rank=sum(fraction_rank, na.rm=TRUE)) %>% left_join(omicron_model_count, by="model") %>% 
+mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score>0)
+
+```
+
+### Alpha period: Plot maps of best performing models by county 
+
+```{r, fig.height=12}
+
+MAE_map_alpha<-alpha_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist_v2<-alpha_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  # guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-alpha_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  # guides(fill = "none") +
+  theme_classic()
+
+
+MAE_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+
+col2<- cowplot::plot_grid(MAE_map_alpha, MAE_rankings_alpha, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+alpha_winner %>% ungroup() %>% count(model) %>% kable
+alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+```
+
+
+### Whole Delta period: Plot maps of best performing models by county for 
+
+```{r}
+
+MAE_map_delta<-delta_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist<-delta_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-delta_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  guides(fill = "none") +
+  theme_classic()
+
+
+MAE_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(delta_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(delta_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  labs(fill = "Model:") +
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_delta<-delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+
+
+col2<- cowplot::plot_grid(MAE_map_delta, MAE_rankings_delta, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_delta, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+delta_winner %>% ungroup() %>% count(model) %>% kable
+delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+
+```
+
+
+### Omicron: Plot maps of best performing models by count
+
+```{r}
+MAE_map_omicron<-omicron_winner %>% left_join(county_fips, by="county") %>%
+  left_join(urbnmapr::counties, by = "county_fips") %>% 
+  filter(state_name =="California") %>% 
+  ggplot(mapping = aes(long, lat, group = group, fill = model)) +
+  geom_polygon(color = "#ffffff", size = .25) +
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_winner$model)] )+
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  guides(fill = "none") +
+  theme_classic()+
+  xlab(NULL)+ ylab(NULL)+
+    theme(axis.line = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+#version 1- histogram of winning models by county
+MAE_hist<-omicron_winner  %>% ggplot(aes(model)) + geom_histogram(stat="count", aes(fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_winner$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Count")+
+  guides(fill = "none") +
+  theme_classic()
+
+#version 2- histogram of normalized ranking scores
+MAE_hist<-omicron_model_sum  %>% ggplot(aes(model)) + geom_col(aes(x=model, y=normalized_score, fill=model))+ 
+scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_model_sum$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_model_sum$model)] )+
+  scale_x_discrete(name="Model Type", labels= NULL)+
+  ylab("Normalized Rank")+
+  guides(fill = "none") +
+  theme_classic()
+
+MAE_heatmap_omicron<-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_daily_winner$model)] )+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill=guide_legend(title.position="left", nrow=1))+
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+participants_heatmap_omicron <-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  guides(fill=guide_legend(title.position="left", nrow=2))+
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>% drop_na() %>%
+  mutate(med = median(fraction_rank, na.rm=TRUE), avg= mean(fraction_rank, na.rm=TRUE)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
+  geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
+  geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
+  facet_grid(forecaster ~., scale="free")+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ 
+  guides(fill="none")+ 
+  theme(strip.text = element_blank())
+
+# row1<-cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, labels=c("A", "B"), ncol=2, align="hv", axis = "tb")
+# row2<-cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("C", "D"), ncol=2, align="hv", axis = "l")
+# cowplot::plot_grid(row1, row2, ncol=1, align="hv", axis= "tb", rel_heights = c(2.5,1))
+# cowplot::plot_grid(MAE_map_omicron, MAE_hist, ncol=2, axis = "l")
+
+col2<- cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
+cowplot::plot_grid(MAE_heatmap_omicron, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+
+
+# cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, col2, ncol=3, labels=c("A", "B", ""), axis = "l", rel_widths = c(1,1, .5))
+
+omicron_winner %>% ungroup() %>% count(model) %>% kable
+omicron_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
+  mutate(med = median(fraction_rank), avg= mean(fraction_rank)) %>% select(forecaster, med, avg) %>% unique() %>% kable()
+
+```
+
+### Number of forecasts participants by date
+
+```{r}
+participants_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("County")+
+  #guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+legend <- cowplot::get_legend(
+  # create some space to the left of the legend
+  participants_heatmap_alpha
+)
+
+participants_heatmap_alpha<- participants_heatmap_alpha+ guides(fill="none")
+
+participants_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of/Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("")+
+  guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+participants_heatmap_omicron <-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
+  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  scale_fill_manual(name = "Number of Available Forecasts",  values=num_forecasts_col)+
+  scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
+  ylab("")+
+  # guides(fill=guide_legend(title.position="left", nrow=2))+
+   guides(fill="none")+  
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "right")#+  ggtitle("Best daily performing model by county as measured by MAE")
+
+
+# cowplot::plot_grid(participants_heatmap_alpha, participants_heatmap_delta, participants_heatmap_omicron, labels="AUTO", ncol=3, align="hv", axis = "tb")
+row1<- cowplot::plot_grid(participants_heatmap_alpha, participants_heatmap_delta, participants_heatmap_omicron, labels="AUTO", ncol=3, align="hv", axis = "tb")
+cowplot::plot_grid(row1, legend, ncol=1, rel_heights=c(3,0.5))
+
+
+```
+
+
+### Train Random Forest Classification
+
+```{r rf-train-21day, echo=FALSE}
+
+MAE_county<-daily_winner %>% left_join(poverty, by= "county") %>% left_join(unemploy, by= "county") %>% left_join(edu, by= "county") %>% left_join(vx, by=c("county", "index")) %>% left_join(regions %>% select(region=region_long, county, dof_pop_county), by="county") %>% left_join(reff_curve_cnty, by=c("index"="index", "county"= "county")) %>%
+  left_join(reff_change, by=c("index", "county")) %>% mutate(county=as.factor(county), RUC_Code=as.factor(RUC_Code), model=as.factor(model), time_since=lubridate::decimal_date(index), delta_up=ifelse(as.Date(index)<as.Date("2021-08-31"), TRUE, FALSE)) %>% rename(pop_size=dof_pop_county, r_eff=estimate) %>% left_join(variants, by=c("index", "region")) %>% na.omit()
+
+MAE_ranks_county<- MAE_ranks_long %>% left_join(poverty, by= "county") %>% left_join(unemploy, by= "county") %>% left_join(edu, by= "county") %>% left_join(vx, by=c("county", "index")) %>% left_join(regions %>% select(region=region_long, county, dof_pop_county), by="county") %>% left_join(reff_curve_cnty, by=c("index"="index", "county"= "county")) %>%
+  left_join(reff_change, by=c("index", "county")) %>% mutate(county=as.factor(county), RUC_Code=as.factor(RUC_Code), model=as.factor(model), time_since=lubridate::decimal_date(index), delta_up=ifelse(as.Date(index)<as.Date("2021-08-31"), TRUE, FALSE)) %>% rename(pop_size=dof_pop_county, r_eff=estimate) %>% left_join(variants, by=c("index", "region")) %>% na.omit()
+
+
+MAE_county <- MAE_county %>% drop_na()
+inTraining <- createDataPartition(MAE_county$model, p = .7, list = FALSE)
+training <- MAE_county[ inTraining,]
+testing  <- MAE_county[-inTraining,]
+
+
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 4,
+                           repeats = 4, allowParallel = TRUE)
+
+rfFit1 <- train(model ~ perc_pov+ perc_unemploy+ income + education + perc_COVIDvx + pop_size + r_eff + alpha_frac + gamma_frac+ omicron_frac + delta_frac + other_frac + diff, data = training, 
+                 method = "rf", 
+                 trControl = fitControl,
+                 verbose = TRUE, preProc = c("center", "scale"))
+rfFit1
+fit1_varImp<-varImp(rfFit1)
+plot(fit1_varImp, main="MAE")
+fit1_varImp
+# predict(rfFit1, newdata = testing)
+
+
+proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Population size", "Delta variant prevalence", "Other variant prevalence",  "Alpha variant prevalence", "Gamma variant prevalence", "Unemployment (%)","Income",  "4-year college degree (%)", "Omicron variant prevalence","Poverty (%)")
+
+var_imp<-data.frame(proper_names, importance=fit1_varImp$importance[order(fit1_varImp$importance, decreasing=TRUE),])
+
+var_imp_21day<-var_imp %>% ggplot(aes(x = reorder(proper_names, importance), y=importance))+ geom_bar(stat="identity", fill="dark blue")+ theme_classic()+ coord_flip() + xlab("Variable") + ylab("Variable Importance")
+
+
+```
+
+
+## Relative error
+
+```{r}
+score_cards_tourney_rel <- score_cards_tourney %>% mutate(relative_error= predicted-actual, norm_relative_error= relative_error*100/hosp_capacity)
+
+rel_error_7day<- score_cards_tourney_rel %>% filter(ahead==7) %>% mutate(variant_period= 
+                    case_when(index > as.Date(alpha_start) & index < as.Date(alpha_end) ~"Alpha",
+                              index > as.Date(delta_start) & index < as.Date(delta_end) ~"Delta",
+                              index > as.Date(omicron_start) & index < as.Date(omicron_end) ~"Omicron")) #%>% drop_na(variant_period)
+
+rel_error_14day<- score_cards_tourney_rel %>% filter(ahead==14) %>% mutate(variant_period= 
+                    case_when(index > as.Date(alpha_start) & index < as.Date(alpha_end) ~"Alpha",
+                              index > as.Date(delta_start) & index < as.Date(delta_end) ~"Delta",
+                              index > as.Date(omicron_start) & index < as.Date(omicron_end) ~"Omicron")) %>% drop_na(variant_period)
+
+rel_error_21day<- score_cards_tourney_rel %>% filter(ahead==21) %>% mutate(variant_period= 
+                    case_when(index > as.Date(alpha_start) & index < as.Date(alpha_end) ~"Alpha",
+                              index > as.Date(delta_start) & index < as.Date(delta_end) ~"Delta",
+                              index > as.Date(omicron_start) & index < as.Date(omicron_end) ~"Omicron")) %>% drop_na(variant_period)
+rel_error<- rel_error_7day %>% bind_rows(rel_error_14day) %>% bind_rows(rel_error_21day)
+
+alpha_rel_error_7day <- rel_error_7day %>% filter(index > as.Date(alpha_start) & index < as.Date(alpha_end)) %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ geom_density_ridges()+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ theme(strip.text = element_blank())+ ggtitle("Alpha: 7-Day Relative Error")
+
+delta_rel_error_7day <- rel_error_7day %>% filter(index > as.Date(delta_start) & index < as.Date(delta_end)) %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ geom_density_ridges()+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_rel_error_7day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ theme(strip.text = element_blank())+ ggtitle("Delta: 7-Day Relative Error")
+
+omicron_rel_error_14day <- rel_error_14day %>% filter(index > as.Date(omicron_start) & index < as.Date(omicron_end)) %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ geom_density_ridges()+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_14day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_14day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ theme(strip.text = element_blank())+ ggtitle("Omicron: 14-Day Relative Error")
+
+rel_error_7day %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ geom_density_ridges()+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ geom_vline(xintercept= 0, lty="dashed") + ggtitle("7-Day Relative Error")
+
+rel_error_7day %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ geom_density_ridges()+ facet_wrap(county ~.)+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ geom_vline(xintercept= 0, lty="dashed") + ggtitle("7-Day Relative Error")
+
+rel_error_14day %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ geom_density_ridges()+ facet_wrap(variant_period~.)+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ geom_vline(xintercept= 0, lty="dashed") + ggtitle("14-Day Relative Error")
+
+rel_error_21day %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ geom_density_ridges()+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_rel_error_7day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ geom_vline(xintercept= 0, lty="dashed") + ggtitle("21-Day Relative Error")
+
+rel_error %>% drop_na(variant_period) %>% ggplot(aes(x=norm_relative_error, y=forecaster, fill=forecaster))+ facet_grid(variant_period~ ahead, scale="free")+ geom_density_ridges(rel_min_height = 0.01) + geom_vline(xintercept=0, lty="dashed")+
+   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)]) + 
+  theme_classic()+ xlab("Normalized Relative Error (%)")+ ylab("Model")+ guides(fill="none")+ xlim(-75,200)
+
+A7day<-rel_error_7day %>% mutate(forecast_date=as.Date(forecast_date)) %>% group_by(forecast_date, forecaster) %>% summarise(sd=sd(norm_relative_error, na.rm=TRUE), norm_relative_error=mean(norm_relative_error, na.rm=TRUE), ymin= norm_relative_error-sd, ymax= norm_relative_error+sd) %>% ggplot() + geom_path(aes(x=forecast_date, y=norm_relative_error, col= forecaster))+ geom_ribbon(aes(x= forecast_date, ymin=ymin, ymax=ymax, fill= forecaster), alpha=0.2)+ theme_classic()+ facet_wrap(forecaster~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)])+
+    scale_color_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)])+ xlab("Publication Date")+ ylab("Normalized Relative Error (%)") + geom_hline(yintercept= 0, lty="dashed")+ guides(fill="none",col="none")
+
+B14day<-rel_error_14day %>% mutate(forecast_date=as.Date(forecast_date)) %>% group_by(forecast_date, forecaster) %>% summarise(sd=sd(norm_relative_error, na.rm=TRUE), norm_relative_error=mean(norm_relative_error, na.rm=TRUE), ymin= norm_relative_error-sd, ymax= norm_relative_error+sd) %>% ggplot() + geom_path(aes(x=forecast_date, y=norm_relative_error, col= forecaster))+ geom_ribbon(aes(x= forecast_date, ymin=ymin, ymax=ymax, fill= forecaster), alpha=0.2)+ theme_classic()+ facet_wrap(forecaster~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)])+
+    scale_color_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)])+ xlab("Publication Date")+ ylab("Normalized Relative Error (%)") + geom_hline(yintercept= 0, lty="dashed")
+
+
+C21day<-rel_error_21day %>% mutate(forecast_date=as.Date(forecast_date)) %>% group_by(forecast_date, forecaster) %>% summarise(sd=sd(norm_relative_error, na.rm=TRUE), norm_relative_error=mean(norm_relative_error, na.rm=TRUE), ymin= norm_relative_error-sd, ymax= norm_relative_error+sd) %>% ggplot() + geom_path(aes(x=forecast_date, y=norm_relative_error, col= forecaster))+ geom_ribbon(aes(x= forecast_date, ymin=ymin, ymax=ymax, fill= forecaster), alpha=0.2)+ theme_classic()+ facet_wrap(forecaster~.)+
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)])+
+    scale_color_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(rel_error_7day$forecaster)])+ xlab("Publication Date")+ ylab("Normalized Relative Error (%)")+ geom_hline(yintercept= 0, lty="dashed") + guides(fill="none",col="none")
+
+cowplot::plot_grid(A7day, B14day, C21day, ncol=1, labels= "AUTO", align = "v", axis = "lr")
+```
+
+
+## Plot RF results
+
+SI Figure 23
+
+```{r}
+cowplot::plot_grid(var_imp_7day, var_imp_14day, var_imp_21day, labels="AUTO", ncol= 1)
+```
+
+
+## Compare ensemble performance across counties
+
+SI Figure 24
+
+```{r}
+library(forcats)
+library(equatiomatic)
+
+ensemble_scores<- score_cards_tourney %>% filter(forecaster=="Ensemble", ahead==1) %>% left_join(regions, by="county")
+
+#Individual counties colored by region x-axis ordered by county population size
+#7 day
+A_7day<- ensemble_scores %>% ggplot(aes(x=fct_reorder(county, dof_pop_county), y=norm_MAE_7day)) + 
+  geom_boxplot(aes(fill=region_acronym)) + 
+  scale_y_continuous(trans='log10') + 
+  # facet_grid(fct_reorder(region_acronym, dof_pop_county) ~.,scales="free")+
+  scale_fill_manual(name = "Health Officer Regions", values= region_col_abr)+
+  theme_classic()+ ylab("Normalized 7-day MAE (log scale)")+ xlab("County (in order of increasing population size)")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), legend.position = "right") + geom_smooth(method="lm", se=TRUE, aes(group=1), col="black", linetype="dashed") #+ #guides(fill="none") #+ 
+
+legend <- cowplot::get_legend(
+  # create some space to the left of the legend
+  A_7day
+)
+
+A_7day<- A_7day+ guides(fill="none")
+
+#14 day
+B_14day <- ensemble_scores %>% ggplot(aes(x=fct_reorder(county, dof_pop_county), y=norm_MAE_14day)) + 
+  geom_boxplot(aes(fill=region_acronym)) + 
+  scale_y_continuous(trans='log10') + 
+  # facet_grid(fct_reorder(region_acronym, dof_pop_county) ~.,scales="free")+
+  scale_fill_manual(name = "Health Officer Regions", values= region_col_abr)+
+  theme_classic()+ ylab("Normalized 14-day MAE (log scale)")+ xlab("County (in order of increasing population size)")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + geom_smooth(method="lm", se=TRUE, aes(group=1), col="black", linetype="dashed") + guides(fill="none")
+
+#21 day
+C_21day<- ensemble_scores %>% ggplot(aes(x=fct_reorder(county, dof_pop_county), y=norm_MAE_21day)) + 
+  geom_boxplot(aes(fill=region_acronym)) + 
+  scale_y_continuous(trans='log10') + 
+  # facet_grid(fct_reorder(region_acronym, dof_pop_county) ~.,scales="free")+
+  scale_fill_manual(name = "Health Officer Regions", values= region_col_abr)+
+  theme_classic()+ ylab("Normalized 21-day MAE (log scale)")+ xlab("County (in order of increasing population size)")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + geom_smooth(method="lm", se=TRUE, aes(group=1), col="black", linetype="dashed") + guides(fill="none") 
+
+
+cowplot::plot_grid(A_7day, B_14day, C_21day, legend, labels=c("A", "B", "C", ""), ncol=2)
+
+#Individual counties colored by region x-axis ordered by median norm_MAE
+ensemble_scores %>% group_by(county) %>% mutate(median_norm_MAE=median(norm_MAE_14day)) %>% ggplot(aes(x=fct_reorder(county, median_norm_MAE), y=norm_MAE_14day)) + 
+  geom_boxplot(aes(fill=region_acronym)) + 
+  scale_y_continuous(trans='log10') + 
+  # facet_grid(fct_reorder(region_acronym, dof_pop_county) ~.,scales="free")+
+  scale_fill_manual(name = "Health Officer Regions", values= region_col_abr)+
+  theme_classic()+ ylab("Normalized Mean Absolute Error (log scale)")+ xlab("County (in order of median normalized MAE)")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + geom_smooth(method="lm", se=TRUE, aes(group=1), col="black", linetype="dashed") #+ #guides(fill="none") #+ 
+
+
+
+ensemble_scores %>% ggplot(aes(x=fct_reorder(county, dof_pop_county), y=norm_MAE_14day, fill=region_acronym)) + 
+  geom_boxplot() + 
+  #scale_y_continuous(trans='log10') + 
+  # facet_grid(fct_reorder(region_acronym, dof_pop_county) ~.,scales="free")+
+  scale_fill_manual(name = "Health Officer Regions", values= region_col_abr)+
+  theme_classic()+ ylab("Normalized Mean Absolute Error")+ xlab("County (in order of increasing population size)")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + geom_smooth(method="lm", se=TRUE, aes(group=1), col="black", linetype="dashed") #+ #guides(fill="none") #+ 
+
+#use log of norm_MAE because of increasing variance for smaller counties
+county_lm<-lm(log(norm_MAE_14day) ~fct_reorder(county, dof_pop_county), data=ensemble_scores)
+summary(county_lm)
+equatiomatic::extract_eq(county_lm)
+
+pop_lm<-lm(log(norm_MAE_14day) ~dof_pop_county, data=ensemble_scores)
+summary(pop_lm)
+equatiomatic::extract_eq(pop_lm)
+
+#Grouped by regions
+ensemble_scores %>% ggplot(aes(x=dof_pop_county, y=norm_MAE_14day)) + 
+  geom_boxplot(aes(fill=region_acronym)) + 
+  geom_smooth(method='lm')+
+  scale_y_continuous(trans='log10') + 
+  scale_x_continuous(trans='log10') + 
+    scale_fill_manual(name = "Health Officer Regions", values= region_col_abr)+
+  # facet_grid(fct_reorder(region_acronym, dof_pop_county) ~.,scales="free")+
+  #scale_fill_manual(name = "Health Officer Regions", values= met.brewer("Hokusai1", 5))+
+  theme_classic()+ xlab("Population Size")+ ylab("Normalized MAE")# + guides(fill="none") #+ theme(strip.text = element_blank())
+
+#Individual counties with facet grid split by regions
+ensemble_scores %>% ggplot(aes(x=norm_MAE_14day, y=fct_reorder(county, dof_pop_county), fill=region_acronym)) + 
+  geom_boxplot() + 
+  scale_x_continuous(trans='log10') + 
+  geom_smooth(method='lm', orientation="y", aes(group=1), col="black", linetype="dashed", se=TRUE)+
+  facet_grid(fct_reorder(region_acronym, dof_pop_county) ~.,scales="free")+
+  scale_fill_manual(name = "Health Officer Regions", values= region_col_abr)+
+  theme_classic()+ xlab("Normalized Mean Absolute Error")+ ylab("County")+ guides(fill="none") #+ theme(strip.text = element_blank())
+
+
+max_models %>% group_by(county) %>% left_join(regions, by="county") %>% ggplot(aes(x=fct_reorder(county, dof_pop_county), y= models_per_day)) + geom_boxplot() + theme_classic()
+
+```
+
+

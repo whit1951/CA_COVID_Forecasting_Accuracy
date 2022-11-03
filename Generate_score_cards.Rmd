@@ -1,0 +1,191 @@
+---
+title: "Generate tournament scoring cards"
+author: "Lauren White (Lauren.White@cdph.ca.gv)"
+date: "2/24/2022"
+output: html_document
+---
+Code to generate tournament ranking cards that are used for pairwise ranking in `Pairwise_ranking.Rmd`
+
+
+```{r setup, include=FALSE}
+### Setup + load libraries
+
+library( tidyverse)
+library( lubridate)
+library( stringr)
+library( roll)
+library( knitr)
+library( data.table)
+library( ggthemes)
+library( grid)
+library( gridExtra)
+library( rmarkdown)
+library( scales)
+library( tinytex)
+
+# library(evalcast)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(RColorBrewer)
+library(stringr)
+
+`%notin%` <- Negate(`%in%`)
+
+
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning= FALSE, cache=FALSE, cache.lazy = FALSE)
+# rsconnect::writeManifest()
+options(tinytex.verbose = TRUE)
+```
+
+```{r set-parameters, include=FALSE}
+### Establish parameters
+
+analysis_start_date = as.Date("2021-01-01") #first prediction day
+window_start = 1 
+window_end = 28 #how many days to include in window for MAE summation?
+
+go_report_date    <- as.Date("2022-02-01") #Sys.Date()-1 
+analysis_end_date<-go_report_date-window_end #last prediction day
+
+go_forecast_dates   <- go_report_date + seq(7,14,by=7)
+
+regions <- fread("~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv")
+
+#sourced from `CA-baseline.Rmd`
+baseline<-fread("~/CA_COVID_Forecasting_Accuracy/results/baseline.csv") %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date), index=as.Date(index))
+
+calcathosp_baseline<-fread("~/CA_COVID_Forecasting_Accuracy/results/calcathosp_baseline.csv") %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date))
+```
+
+```{r load-data, include= FALSE}
+### Load observed and predicted data
+
+## Observed data
+act_raw <- fread("~/CA_COVID_Forecasting_Accuracy/data/COVID_hospital_census.csv")
+
+actuals <- act_raw %>% 
+  mutate( index = mdy( Most.Recent.Date), model= "ACTUALS") %>% rename(county=County.Name) %>% left_join(regions, by= "county") %>%
+  group_by( index ) %>% select(County.Name=county, region=region_healthofficer, model, index, hospitalized= COVID.19.Positive.Patients)
+remove(act_raw)
+
+
+### Predicted outcomes from forecasting models for hospitalizations
+if( !exists( "calcathosp"))
+{
+  hosp_file <- "~/CA_COVID_Forecasting_Accuracy/data/CalCAT_hosp_forecasts.csv"
+  calcathosp  <-  fread( hosp_file ) %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date))
+}
+
+
+
+```
+
+```{r load-hospital-capacity, include=FALSE}
+### Load hospital capacity data
+
+indicator_vars <- c("total_non_surge_inpatient_beds_exc_hosp_no_ed")
+new_names <- c( "hosp_capacity_nonsurge")
+scale <- "county"
+names(indicator_vars) <- new_names
+
+
+indicators_raw <- read.csv("~/CA_COVID_Forecasting_Accuracy/data/hosp_capacity.csv")
+
+indicators <- indicators_raw %>% 
+  mutate( date= as_date(date)) %>%
+  spread( c("variable"), c("value")) %>%  
+  filter( date >= analysis_start_date & date <= go_report_date) %>%
+  arrange( location, date)%>%
+  select( -classification, -location_level )%>%
+  rename(!!indicator_vars) %>%
+  rename(county = location)
+
+hosp_capacity_all<-indicators %>% group_by(county) %>% summarize(hosp_capacity = median(hosp_capacity_nonsurge, na.rm = T)) %>% rename(County.Name=county)
+
+hosp_capacity_regional<-indicators %>% left_join(regions, by= "county") %>% group_by(date, region_healthofficer) %>% summarize(hosp_capacity=sum(hosp_capacity_nonsurge, na.rm = T)) %>% group_by(region_healthofficer) %>% summarize(hosp_capacity = median(hosp_capacity, na.rm = T)) %>% rename(region=region_healthofficer)
+```
+
+## Calculate absolute error
+```{r calc-AE, include=FALSE}
+
+hosp <- calcathosp %>% bind_rows(calcathosp_baseline) %>%
+  filter(est_date >= analysis_start_date, p_date<=go_report_date, delay >= window_start, county!="California") %>% rename(County.Name=county, hospitalized=estimate) %>%
+  group_by( index = p_date, model, County.Name ) 
+   # filter(model %in% models_rename)
+existing_models<-unique(hosp$model) #define model names for future column labeling
+
+#join and rename
+actuals_county_long <- actuals %>% select(-c(region,model)) %>% rename(est_date=index, ACTUALS=hospitalized)
+
+ae_table<- hosp %>% left_join(actuals_county_long, by=c("est_date", "County.Name")) %>%
+  bind_rows(baseline) %>% filter( index >= analysis_start_date, p_date<=go_report_date) %>%
+  mutate( ae= abs(hospitalized - ACTUALS)) 
+
+
+error_table <- hosp  %>%  pivot_wider(names_from = "model", values_from = "hospitalized") %>% drop_na(est_date) %>% filter(est_date<=go_report_date) %>% left_join(actuals_county_long, by=c("est_date", "County.Name"))  %>%
+  filter( index >= analysis_start_date) %>%  mutate( across( colnames(.)[colnames(.) %in% existing_models],  ~ abs(.x- ACTUALS), .names = "diff_{col}" )) 
+
+#Create Mean Absolute Error (MAE) table
+diff_colnames<-paste0("diff_",existing_models)
+MAE_diff_colnames<-paste0("MAE_diff_", existing_models)
+
+#28 days
+MAE_table_28day <- error_table %>% filter(delay<=28, p_date<=go_report_date-28) %>% group_by(County.Name, index) %>%
+  summarize(across( all_of(diff_colnames),  ~ sum(.x, na.rm=FALSE)/(28), .names = "MAE_{col}" ))
+
+MAE_names<- MAE_diff_colnames[MAE_diff_colnames %in% colnames(MAE_table_28day)]
+MAE_table_long_28day<- MAE_table_28day  %>% pivot_longer(all_of(MAE_names), names_to= "MAE_type") %>% left_join(hosp_capacity_all, by="County.Name") %>% mutate(norm_MAE_28day=value/hosp_capacity*100) %>% separate(MAE_type, sep = "MAE_diff_", c(NA, "model")) %>% rename(MAE_28day=value)
+
+#21 days
+MAE_table_21day <- error_table %>% filter(delay<=21, p_date<=go_report_date-21) %>% group_by(County.Name, index) %>%
+  summarize(across( all_of(diff_colnames),  ~ sum(.x, na.rm=FALSE)/(21), .names = "MAE_{col}" ))
+
+MAE_names<- MAE_diff_colnames[MAE_diff_colnames %in% colnames(MAE_table_21day)]
+MAE_table_long_21day<- MAE_table_21day  %>% pivot_longer(all_of(MAE_names), names_to= "MAE_type") %>% left_join(hosp_capacity_all, by="County.Name") %>% mutate(norm_MAE_21day=value/hosp_capacity*100) %>% separate(MAE_type, sep = "MAE_diff_", c(NA, "model")) %>% rename(MAE_21day=value)
+
+#14 days
+MAE_table_14day <- error_table %>% filter(delay<=14, p_date<=go_report_date-14) %>% group_by(County.Name, index) %>%
+  summarize(across( all_of(diff_colnames),  ~ sum(.x, na.rm=FALSE)/(14), .names = "MAE_{col}" ))
+
+MAE_names<- MAE_diff_colnames[MAE_diff_colnames %in% colnames(MAE_table_14day)]
+MAE_table_long_14day<- MAE_table_14day  %>% pivot_longer(all_of(MAE_names), names_to= "MAE_type") %>% left_join(hosp_capacity_all, by="County.Name") %>% mutate(norm_MAE_14day=value/hosp_capacity*100) %>% separate(MAE_type, sep = "MAE_diff_", c(NA, "model")) %>% rename(MAE_14day=value)
+
+#7 days
+MAE_table_7day <- error_table %>% filter(delay<=7, p_date<=go_report_date-7) %>% group_by(County.Name, index) %>%
+  summarize(across( all_of(diff_colnames),  ~ sum(.x, na.rm=FALSE)/(7), .names = "MAE_{col}" ))
+
+MAE_names<- MAE_diff_colnames[MAE_diff_colnames %in% colnames(MAE_table_7day)]
+MAE_table_long_7day<- MAE_table_7day  %>% pivot_longer(all_of(MAE_names), names_to= "MAE_type") %>% left_join(hosp_capacity_all, by="County.Name") %>% mutate(norm_MAE_7day=value/hosp_capacity*100) %>% separate(MAE_type, sep = "MAE_diff_", c(NA, "model")) %>% rename(MAE_7day=value)
+```
+
+## Set up score card
+```{r score-card}
+scores_7day <- ae_table %>% filter(delay<=7) %>% left_join(MAE_table_long_7day, by=c("County.Name", "model", "index"))  %>% select(-hosp_capacity) 
+scores_14day <- ae_table %>% filter(delay<=14) %>% left_join(MAE_table_long_14day, by=c("County.Name", "model", "index")) %>% select(-hosp_capacity)
+scores_21day <- ae_table %>% filter(delay<=21) %>% left_join(MAE_table_long_21day, by=c("County.Name", "model", "index")) %>% select(-hosp_capacity)
+
+score_cards_tourney <- ae_table %>% left_join(hosp_capacity_all, by="County.Name") %>% 
+  left_join(MAE_table_long_28day %>% select(-hosp_capacity), by=c("County.Name", "model", "index")) %>%
+  left_join(scores_7day) %>% left_join(scores_14day) %>% left_join(scores_21day) %>% 
+  mutate(forecaster=case_when(model=="jhu" ~"JHU",
+                              model=="columbia"~"Columbia",
+                              model=="covid_nearterm"~"COVID Nearterm",
+                              model=="simple"~ "Simple Growth",
+                              model=="google"~ "Google",
+                              model=="m.proj"~ "Ensemble",
+                              model=="lemma"~ "LEMMA",
+                              model=="stanford"~ "Stanford",
+                              model=="stanford_lw"~ "Stanford LW",
+                              model=="ucsd"~ "UCSD",
+                              TRUE~model)) %>%
+  ungroup()%>%
+  select(ahead=delay, geo_value=County.Name, model, forecaster, forecast_date=p_date, target_end_date=est_date, predicted=hospitalized, actual=ACTUALS, hosp_capacity, ae, MAE_7day, norm_MAE_7day, MAE_14day, norm_MAE_14day, MAE_21day, norm_MAE_21day, MAE_28day, norm_MAE_28day) %>% distinct()
+
+```
+
+```{r save-output}
+save_path<-"~/CA_COVID_Forecasting_Accuracy/results"
+write_csv(score_cards_tourney, file.path(save_path, "score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv" ))
+```

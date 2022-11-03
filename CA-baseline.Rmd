@@ -1,0 +1,75 @@
+---
+title: "CA-baseline"
+author: "Lauren White (lauren.white@cdph.ca.gov)"
+date: "5/25/2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+library( tidyverse)
+library( lubridate)
+library( stringr)
+library( roll)
+library( knitr)
+library( data.table)
+library( ggthemes)
+library( grid)
+library( gridExtra)
+library( rmarkdown)
+library( scales)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+`%notin%` <- Negate(`%in%`)
+
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning= FALSE, cache=FALSE, cache.lazy = FALSE)
+
+analysis_start_date = as.Date("2021-01-01") #first prediction day
+window_start = 1 
+window_end = 28 #how many days to include in window for MAE summation?
+
+go_report_date    <- as.Date("2022-02-01") #Sys.Date()-1 
+analysis_end_date<-go_report_date-window_end #last prediction day
+
+```
+
+## Load actual hospitalization data
+
+```{r load-data}
+regions <- fread("~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv")
+
+## Observed data
+act_raw <- fread("~/CA_COVID_Forecasting_Accuracy/data/COVID_hospital_census.csv")
+
+actuals <- act_raw %>% 
+  mutate( index = mdy( Most.Recent.Date), model= "ACTUALS") %>% rename(county=County.Name) %>% left_join(regions, by= "county") %>%
+  group_by( index ) %>% select(geo_value=county, region=region_healthofficer, model, index, hospitalized= COVID.19.Positive.Patients) %>% arrange(geo_value, index) %>% group_by(geo_value) %>% mutate(hosp_rolling_mean= zoo::rollmean(hospitalized, k = 7, align = "right",fill = NA)) %>% filter(index >= analysis_start_date) %>% select(geo_value, index, predicted=hosp_rolling_mean, ACTUALS=hospitalized)
+
+
+remove(act_raw)
+
+actuals_sub<- actuals %>% rename(target_end_date=index) %>% select(geo_value, target_end_date, ACTUALS)
+```
+
+## Create baseline model
+
+```{r}
+baseline<-expand.grid(geo_value=unique(regions$county), index=seq(as.Date(analysis_start_date), as.Date(go_report_date), "days"), model="CA-baseline", target_end_date=seq(as.Date(analysis_start_date), as.Date(go_report_date), "days")) %>% mutate(forecast_date=index, ahead=target_end_date-forecast_date) %>% filter(ahead<=28 & ahead >=1) %>% arrange(geo_value, index, target_end_date) %>% left_join(actuals %>% select(index, geo_value, predicted), by=c("geo_value", "index")) %>% left_join(actuals_sub) %>% mutate(ae=abs(predicted-ACTUALS), ahead=as.numeric(ahead)) %>% left_join(regions %>% rename(geo_value=county), by="geo_value") %>%
+  select(County.Name=geo_value, region=region_healthofficer, est_date=target_end_date, p_date=forecast_date, index, delay=ahead, hospitalized=predicted, model, ACTUALS, ae)
+
+calcathosp_baseline<-baseline %>% rename(county=County.Name) %>% left_join(regions, by="county") %>% select(est_date, county, region, estimate=hospitalized, p_date, delay, model)
+```
+
+## Save baseline output
+
+```{r}
+save_path<-"~/CA_COVID_Forecasting_Accuracy/results"
+write_csv(baseline, file.path(save_path, "baseline.csv" ))
+write_csv(calcathosp_baseline, file.path(save_path, "calcathosp_baseline.csv" ))
+
+```
+
