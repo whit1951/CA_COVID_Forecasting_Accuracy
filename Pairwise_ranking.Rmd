@@ -9,7 +9,7 @@ output:
 ---
 
 # Methods
-- Based on pairwise methods from CMU-Delphi repository: https://github.com/cmu-delphi/covid-19-forecast/tree/develop/utilities/weekly_evaluation_notebook
+- Based on pairwise tournament methods from CMU-Delphi repository: https://github.com/cmu-delphi/covid-19-forecast/tree/develop/utilities/weekly_evaluation_notebook
 
 
 ## Load forecasting "score card" 
@@ -32,9 +32,7 @@ library( gridExtra)
 library( rmarkdown)
 library( scales)
 library( tinytex)
-
 library(covidcast)
-# library(evalcast)
 library(dplyr)
 library(tidyr)
 library(lubridate)
@@ -64,13 +62,13 @@ healthofficer_shortname <- tribble(
   "Southern California",       "SCAL",       "SoCal",        "Southern California Health Officers"
 )
 
- regions <- read_csv( "~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv")%>% 
+ regions <- read_csv("data/CAregions.csv")%>% 
     select( county, region_healthofficer , dof_pop_county) %>%
     rename( region_long=region_healthofficer) %>%
     left_join( healthofficer_shortname, by = "region_long" ) %>% na.omit()
 
 
-score_cards_tourney <-fread("~/CA_COVID_Forecasting_Accuracy/results/score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv") %>% filter(model %in% c("columbia", "lemma", "m.proj", "covid_nearterm", "simple", "CA-baseline"), geo_value %notin% c("Alpine", "Sierra", "Sutter"), hosp_capacity>25)  %>% mutate(index=as.Date(forecast_date), target_end_date=as.Date(target_end_date)) %>% filter(forecast_date>="2021-02-01", target_end_date <=omicron_end) %>% distinct()
+score_cards_tourney <-fread("results/score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv") %>% filter(model %in% c("columbia", "lemma", "m.proj", "covid_nearterm", "simple", "CA-baseline"), geo_value %notin% c("Alpine", "Sierra", "Sutter"), hosp_capacity>25)  %>% mutate(index=as.Date(forecast_date), target_end_date=as.Date(target_end_date)) %>% filter(forecast_date>="2021-02-01", target_end_date <=omicron_end) %>% distinct()
 
  
 ```
@@ -1591,4 +1589,9 @@ omicron_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra"
 ```{r}
 omicron_col<-cowplot::plot_grid(A_omicron, B_omicron, labels="AUTO", ncol=1, rel_heights = c(1,2.5))
 cowplot::plot_grid(omicron_col, omicron_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
+```
+
+## Print session info
+```{r}
+print(sessionInfo(),	locale	= TRUE)
 ```

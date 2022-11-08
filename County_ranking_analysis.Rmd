@@ -52,13 +52,13 @@ healthofficer_shortname <- tribble(~region_acronym, ~region_long, ~ region_full,
   "SCAL",       "Southern California Health Officers", "Southern California Health Officers (SCAL)"
 )
 
- regions <- read_csv("~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv") %>% 
+ regions <- read_csv("data/CAregions.csv") %>% 
     select( county, region_healthofficer , dof_pop_county) %>%
     rename( region_long=region_healthofficer) %>%
-    left_join( healthofficer_shortname, by = "region_long" ) %>% na.omit()
+    left_join( healthofficer_shortname, by = "region_long") %>% na.omit()
 
 #load data for spatial plotting
-spdf <- geojsonsf::geojson_sf("~/CA_COVID_Forecasting_Accuracy/data/counties.geojson")
+spdf <- geojsonsf::geojson_sf("data/counties.geojson")
 county_fips<-data.frame(county= spdf$NAME_1, county_fips= spdf$COUNTYFI_1)
 
 
@@ -113,7 +113,7 @@ variant_labels <- c("alpha_frac"= "Alpha", "delta_frac"= "Delta" , "gamma_frac"=
  "omicron_frac"="Omicron", "other_frac"="Other")
 
 #actual hospitalizations
-actuals <- fread("~/CA_COVID_Forecasting_Accuracy/data/COVID_hospital_census.csv") %>%  mutate(index = mdy( Most.Recent.Date)) %>% rename(county=County.Name) %>% left_join(regions, by= "county") %>%
+actuals <- fread("data/COVID_hospital_census.csv") %>%  mutate(index = mdy( Most.Recent.Date)) %>% rename(county=County.Name) %>% left_join(regions, by= "county") %>%
   group_by( index ) %>% select(county, region=region_acronym, index, hospitalized= COVID.19.Positive.Patients)
 
 actuals_state<- actuals %>% group_by( index ) %>% summarize(hospitalized= sum(hospitalized, na.rm=TRUE))
@@ -127,7 +127,7 @@ A<-actuals_state %>% filter(index> as.Date("2021-02-01"), index<as.Date("2022-02
 
 
 
-variants <-  fread("~/CA_COVID_Forecasting_Accuracy/data/region_variants_summary.csv") %>% mutate(index=as.Date(date)) 
+variants <-  fread("data/region_variants_summary.csv") %>% mutate(index=as.Date(index)) 
 
 variants_state<- variants %>% filter(region== "California", index> as.Date("2021-02-01") & index < as.Date("2022-02-01")) %>% select(index, region, alpha_frac, gamma_frac, omicron_frac, delta_frac, other_frac) %>% pivot_longer(!c(region, index), names_to = "Variant", values_to = "fraction")
 
@@ -138,7 +138,7 @@ B<- variants_state %>% ggplot()+ geom_line(aes(x=index, y=fraction, col=Variant)
 geom_rect(data = variant_dates, aes(xmin = start_date, xmax = end_date, fill = variant_period), ymin = -Inf, ymax = Inf, alpha = 0.3)+  scale_fill_manual(name="Analysis\nPeriod", labels=variant_labels[names(variant_cols) %in% unique(variant_dates$variant_period)], values=variant_cols[names(variant_cols) %in% unique(variant_dates$variant_period)] )+
   guides(fill="none")
 
-reff_state <- read_csv("~/CA_COVID_Forecasting_Accuracy/data/state_reff.csv") %>%
+reff_state <- read_csv("data/state_reff.csv") %>%
   filter(model == "m.rt") %>% mutate( location = "CA", location_level= "state") 
 C<- reff_state %>% filter(index> as.Date("2021-02-01"), index< as.Date("2022-02-01")) %>% ggplot()+ geom_line(aes(x=index, y=estimate))+ geom_hline(yintercept=1, lty="dashed")+ xlab("Date")+ ylab("R-effective Estimate") + theme_classic()+
   scale_color_manual(values=variant_cols, labels = variant_labels)+
@@ -183,10 +183,10 @@ CA county data sets from: https://www.ers.usda.gov/data-products/county-level-da
 ```{r load-data}
 
 #Socio-economic county-level data
-vx_odp_raw <-read.csv("https://data.chhs.ca.gov/dataset/e283ee5a-cf18-4f20-a92c-ee94a2866ccd/resource/130d7ba2-b6eb-438d-a412-741bde207e1c/download/covid19vaccinesbycounty.csv") #daily vax record
+#daily vax record
+vx_odp_raw <-read.csv("https://data.chhs.ca.gov/dataset/e283ee5a-cf18-4f20-a92c-ee94a2866ccd/resource/130d7ba2-b6eb-438d-a412-741bde207e1c/download/covid19vaccinesbycounty.csv") %>% mutate(index = as.Date(administered_date)+ 14) #Add two week lag beyond administration date to get at "fully vaccinated" status
 
-vx <- vx_odp_raw %>% arrange(administered_date, county) %>% mutate(index=as.Date(administered_date)) %>% left_join(regions) %>% 
-  filter(index>=as.Date("2021-01-01"), county %notin% c("All CA and Non-CA Counties", "All CA Counties", "Unknown")) %>% 
+vx <- vx_odp_raw %>% arrange(index, county) %>% filter(index>=as.Date("2021-01-01"), county %notin% c("All CA and Non-CA Counties", "All CA Counties", "Unknown")) %>%  left_join(regions) %>% 
   mutate(perc_COVIDvx= cumulative_fully_vaccinated/dof_pop_county) %>% select(index, county, perc_COVIDvx)
 
 poverty<- read_xlsx("data/PovertyReport.xlsx", skip=4) %>% select(county= Name, RUC_Code=`RUC Code`, perc_pov= `Percent...7`) %>% filter(county!= "California")  
@@ -195,7 +195,7 @@ unemploy<-read_xlsx("data/UnemploymentReport.xlsx", skip=2) %>% select(county= N
 
 edu<-read_xlsx("data/EducationReport.xlsx", skip=2) %>% select(county= Name, education=`2015-2019`) %>% filter(county!= "California") %>% mutate(county = gsub(", CA", "", county))    
 
-reff_curve_cnty <- fread("~/CA_COVID_Forecasting_Accuracy/data/cnty_reff.csv") %>%
+reff_curve_cnty <- fread("data/cnty_reff.csv") %>%
      filter(model=="m.rt") %>% select(-model, -archivedt) %>% mutate(index=as.Date(index)) 
 
 reff_dates <- seq(as.Date(as.Date("2021-01-01")), max(reff_curve_cnty$index, na.rm = T), by = "1 day")
@@ -215,7 +215,7 @@ reff_change <- bind_rows(lapply(reff_dates, function(t){
 ### Score model performance using fractional ranking
 
 ```{r}
-score_cards_tourney <-fread("~/CA_COVID_Forecasting_Accuracy/results/score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv") %>% filter(model %in% c("columbia", "lemma", "m.proj", "covid_nearterm", "simple", "CA-baseline"), geo_value %notin% c("Alpine", "Sierra", "Sutter")) %>% rename(county=geo_value)  %>% mutate(index=as.Date(forecast_date), target_end_date=as.Date(target_end_date)) %>% filter(forecast_date>="2021-02-01", target_end_date <=omicron_end)
+score_cards_tourney <-fread("results/score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv") %>% filter(model %in% c("columbia", "lemma", "m.proj", "covid_nearterm", "simple", "CA-baseline"), geo_value %notin% c("Alpine", "Sierra", "Sutter")) %>% rename(county=geo_value)  %>% mutate(index=as.Date(forecast_date), target_end_date=as.Date(target_end_date)) %>% filter(forecast_date>="2021-02-01", target_end_date <=omicron_end)
 
 #Update MAE definitions here as needed (MAE_7day, MAE_14day, MAE_21day, MAE_28day) and filter by appropriate ahead/delay (e.g., 7, 14, 21, 28)
 delay<-7
@@ -571,8 +571,8 @@ testing  <- MAE_county[-inTraining,]
 
 
 fitControl <- trainControl(method = "repeatedcv",
-                           number = 10,
-                           repeats = 10, allowParallel = TRUE)
+                           number = 4,
+                           repeats = 4, allowParallel = TRUE)
 
 rfFit1 <- train(model ~ perc_pov+ perc_unemploy+ income + education + perc_COVIDvx + pop_size + r_eff + alpha_frac + gamma_frac+ omicron_frac + delta_frac + other_frac + diff, data = training, 
                  method = "rf", 
@@ -586,9 +586,12 @@ fit1_varImp
 
 
 proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Delta variant prevalence", "Population size", "Other variant prevalence",  "Alpha variant prevalence", "Gamma variant prevalence", "Omicron variant prevalence", "Income", "Unemployment (%)", "4-year college degree (%)", "Poverty (%)")
+abbr <- c("perc_COVIDvx", "r_eff", "diff", "delta_frac", "pop_size", "other_frac", "alpha_frac", "gamma_frac", "omicron_frac", "income", "perc_unemploy", "education", "perc_pov")
+var_imp_names<-data.frame(abbr, proper_names)
 
-var_imp<-data.frame(proper_names, importance=fit1_varImp$importance[order(fit1_varImp$importance, decreasing=TRUE),])
+var_imp<-data.frame(abbr=row.names(fit1_varImp$importance), importance= fit1_varImp$importance$Overall) %>% left_join(var_imp_names) %>% arrange(desc(importance))
 
+# fit1_varImp$importance[order(fit1_varImp$importance, decreasing=TRUE),]
 var_imp_7day<- var_imp %>% ggplot(aes(x = reorder(proper_names, importance), y=importance))+ geom_bar(stat="identity", fill="dark blue")+ theme_classic()+ coord_flip() + xlab("Variable") + ylab("Variable Importance")
 
 ```
@@ -978,9 +981,12 @@ plot(fit1_varImp, main="MAE")
 fit1_varImp
 # predict(rfFit1, newdata = testing)
 
-proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Population size", "Delta variant prevalence", "Other variant prevalence", "Alpha variant prevalence", "Gamma variant prevalence", "Unemployment (%)", "Income",  "4-year college degree (%)", "Omicron variant prevalence", "Poverty (%)")
+proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Delta variant prevalence", "Population size", "Other variant prevalence",  "Alpha variant prevalence", "Gamma variant prevalence", "Omicron variant prevalence", "Income", "Unemployment (%)", "4-year college degree (%)", "Poverty (%)")
+abbr <- c("perc_COVIDvx", "r_eff", "diff", "delta_frac", "pop_size", "other_frac", "alpha_frac", "gamma_frac", "omicron_frac", "income", "perc_unemploy", "education", "perc_pov")
+var_imp_names<-data.frame(abbr, proper_names)
 
-var_imp<-data.frame(proper_names, importance=fit1_varImp$importance[order(fit1_varImp$importance, decreasing=TRUE),])
+var_imp<-data.frame(abbr=row.names(fit1_varImp$importance), importance= fit1_varImp$importance$Overall) %>% left_join(var_imp_names) %>% arrange(desc(importance))
+
 
 var_imp_14day<- var_imp %>% ggplot(aes(x = reorder(proper_names, importance), y=importance))+ geom_bar(stat="identity", fill="dark blue")+ theme_classic()+ coord_flip() + xlab("Variable") + ylab("Variable Importance")
 
@@ -1359,9 +1365,11 @@ fit1_varImp
 # predict(rfFit1, newdata = testing)
 
 
-proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Population size", "Delta variant prevalence", "Other variant prevalence",  "Alpha variant prevalence", "Gamma variant prevalence", "Unemployment (%)","Income",  "4-year college degree (%)", "Omicron variant prevalence","Poverty (%)")
+proper_names<- c("COVID vaccination coverage", "R-effective", "7-Day change in R-effective", "Delta variant prevalence", "Population size", "Other variant prevalence",  "Alpha variant prevalence", "Gamma variant prevalence", "Omicron variant prevalence", "Income", "Unemployment (%)", "4-year college degree (%)", "Poverty (%)")
+abbr <- c("perc_COVIDvx", "r_eff", "diff", "delta_frac", "pop_size", "other_frac", "alpha_frac", "gamma_frac", "omicron_frac", "income", "perc_unemploy", "education", "perc_pov")
+var_imp_names<-data.frame(abbr, proper_names)
 
-var_imp<-data.frame(proper_names, importance=fit1_varImp$importance[order(fit1_varImp$importance, decreasing=TRUE),])
+var_imp<-data.frame(abbr=row.names(fit1_varImp$importance), importance= fit1_varImp$importance$Overall) %>% left_join(var_imp_names) %>% arrange(desc(importance))
 
 var_imp_21day<-var_imp %>% ggplot(aes(x = reorder(proper_names, importance), y=importance))+ geom_bar(stat="identity", fill="dark blue")+ theme_classic()+ coord_flip() + xlab("Variable") + ylab("Variable Importance")
 
@@ -1544,4 +1552,7 @@ max_models %>% group_by(county) %>% left_join(regions, by="county") %>% ggplot(a
 
 ```
 
-
+## Print session info
+```{r}
+print(sessionInfo(),	locale	= TRUE)
+```
