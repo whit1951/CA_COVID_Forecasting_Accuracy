@@ -28,7 +28,7 @@ Repository that contains code for evaluation of California county level COVID-19
 
 * `counties.geojson`- geojson containing spatial plotting information including county FIPS
 
-* `COVID_hospital_census.csv`- COVID-19 hospital census at the county level for CA
+* `COVID_hospital_census.csv`- COVID-19 hospital census at the county level for CA also available from the CA Open Data Portal: https://data.ca.gov/dataset/covid-19-hospital-data1/resource/8f989799-b959-46ca-b3c5-0e67e95b584e
 
 * `hosp_capacity`- county level non-surge hospital capacity for CA
 
