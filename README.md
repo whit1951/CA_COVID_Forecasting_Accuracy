@@ -32,7 +32,7 @@ Repository that contains code for evaluation of California county level COVID-19
 
 * `hosp_capacity`- county level non-surge hospital capacity for CA
 
-* `region_variants_summary.csv` - summary of variant prevalence by region for CA
+* `region_variants_summary.csv` - summary of variant prevalence by region for CA; fractions are based on a 14-day rolling sums of reported sequences.
 
 * `state_reff.csv` - summary of state R-effective estimates; also available from https://calcat.covid19.ca.gov/cacovidmodels/
 
