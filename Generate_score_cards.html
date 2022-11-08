@@ -197,8 +197,53 @@ score_cards_tourney &lt;- ae_table %&gt;% left_join(hosp_capacity_all, by=&quot;
                               TRUE~model)) %&gt;%
   ungroup()%&gt;%
   select(ahead=delay, geo_value=County.Name, model, forecaster, forecast_date=p_date, target_end_date=est_date, predicted=hospitalized, actual=ACTUALS, hosp_capacity, ae, MAE_7day, norm_MAE_7day, MAE_14day, norm_MAE_14day, MAE_21day, norm_MAE_21day, MAE_28day, norm_MAE_28day) %&gt;% distinct()</code></pre>
-<pre class="r"><code>save_path&lt;-&quot;~/CA_COVID_Forecasting_Accuracy/results&quot;
+<pre class="r"><code>save_path&lt;-&quot;results&quot;
 write_csv(score_cards_tourney, file.path(save_path, &quot;score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv&quot; ))</code></pre>
+</div>
+<div id="print-session-info" class="section level2">
+<h2>Print session info</h2>
+<pre class="r"><code>print(sessionInfo(),    locale  = TRUE)</code></pre>
+<pre><code>## R version 3.6.0 (2019-04-26)
+## Platform: x86_64-redhat-linux-gnu (64-bit)
+## Running under: Red Hat Enterprise Linux Server 7.7 (Maipo)
+## 
+## Matrix products: default
+## BLAS/LAPACK: /usr/lib64/R/lib/libRblas.so
+## 
+## locale:
+##  [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C              
+##  [3] LC_TIME=en_US.UTF-8        LC_COLLATE=en_US.UTF-8    
+##  [5] LC_MONETARY=en_US.UTF-8    LC_MESSAGES=en_US.UTF-8   
+##  [7] LC_PAPER=en_US.UTF-8       LC_NAME=C                 
+##  [9] LC_ADDRESS=C               LC_TELEPHONE=C            
+## [11] LC_MEASUREMENT=en_US.UTF-8 LC_IDENTIFICATION=C       
+## 
+## attached base packages:
+## [1] grid      stats     graphics  grDevices utils     datasets  methods  
+## [8] base     
+## 
+## other attached packages:
+##  [1] RColorBrewer_1.1-2 tinytex_0.35       scales_1.1.1       rmarkdown_2.11    
+##  [5] gridExtra_2.3      ggthemes_4.2.0     data.table_1.12.8  knitr_1.28        
+##  [9] roll_1.1.6         lubridate_1.7.4    forcats_0.4.0      stringr_1.4.0     
+## [13] dplyr_1.0.9        purrr_0.3.4        readr_2.1.2        tidyr_1.2.0       
+## [17] tibble_3.1.7       ggplot2_3.3.5      tidyverse_1.3.0   
+## 
+## loaded via a namespace (and not attached):
+##  [1] Rcpp_1.0.4.6       assertthat_0.2.1   digest_0.6.25      utf8_1.1.4        
+##  [5] R6_2.4.1           cellranger_1.1.0   backports_1.1.7    reprex_0.3.0      
+##  [9] evaluate_0.14      httr_1.4.1         pillar_1.7.0       rlang_1.0.2       
+## [13] readxl_1.3.1       rstudioapi_0.13    jquerylib_0.1.4    blob_1.2.0        
+## [17] bit_1.1-14         munsell_0.5.0      broom_0.8.0        compiler_3.6.0    
+## [21] modelr_0.1.5       xfun_0.28          pkgconfig_2.0.3    htmltools_0.4.0   
+## [25] tidyselect_1.1.2   fansi_0.4.1        crayon_1.3.4       tzdb_0.3.0        
+## [29] dbplyr_1.4.4       withr_2.2.0        jsonlite_1.6.1     gtable_0.3.0      
+## [33] lifecycle_1.0.1    DBI_1.1.0          magrittr_1.5       RcppParallel_5.0.1
+## [37] vroom_1.5.7        cli_3.3.0          stringi_1.4.6      fs_1.3.2          
+## [41] xml2_1.3.2         ellipsis_0.3.2     generics_0.1.2     vctrs_0.4.1       
+## [45] tools_3.6.0        bit64_0.9-7        glue_1.6.2         hms_0.5.3         
+## [49] parallel_3.6.0     yaml_2.2.1         colorspace_1.4-1   rvest_0.3.5       
+## [53] haven_2.2.0</code></pre>
 </div>
 
 

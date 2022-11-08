@@ -22,8 +22,6 @@ library( gridExtra)
 library( rmarkdown)
 library( scales)
 library( tinytex)
-
-# library(evalcast)
 library(dplyr)
 library(tidyr)
 library(lubridate)
@@ -51,19 +49,19 @@ analysis_end_date<-go_report_date-window_end #last prediction day
 
 go_forecast_dates   <- go_report_date + seq(7,14,by=7)
 
-regions <- fread("~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv")
+regions <- fread("data/CAregions.csv")
 
 #sourced from `CA-baseline.Rmd`
-baseline<-fread("~/CA_COVID_Forecasting_Accuracy/results/baseline.csv") %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date), index=as.Date(index))
+baseline<-fread("results/baseline.csv") %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date), index=as.Date(index))
 
-calcathosp_baseline<-fread("~/CA_COVID_Forecasting_Accuracy/results/calcathosp_baseline.csv") %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date))
+calcathosp_baseline<-fread("results/calcathosp_baseline.csv") %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date))
 ```
 
 ```{r load-data, include= FALSE}
 ### Load observed and predicted data
 
 ## Observed data
-act_raw <- fread("~/CA_COVID_Forecasting_Accuracy/data/COVID_hospital_census.csv")
+act_raw <- fread("data/COVID_hospital_census.csv")
 
 actuals <- act_raw %>% 
   mutate( index = mdy( Most.Recent.Date), model= "ACTUALS") %>% rename(county=County.Name) %>% left_join(regions, by= "county") %>%
@@ -74,7 +72,7 @@ remove(act_raw)
 ### Predicted outcomes from forecasting models for hospitalizations
 if( !exists( "calcathosp"))
 {
-  hosp_file <- "~/CA_COVID_Forecasting_Accuracy/data/CalCAT_hosp_forecasts.csv"
+  hosp_file <- "data/CalCAT_hosp_forecasts.csv"
   calcathosp  <-  fread( hosp_file ) %>% mutate(est_date=as.Date(est_date), p_date=as.Date(p_date))
 }
 
@@ -85,22 +83,7 @@ if( !exists( "calcathosp"))
 ```{r load-hospital-capacity, include=FALSE}
 ### Load hospital capacity data
 
-indicator_vars <- c("total_non_surge_inpatient_beds_exc_hosp_no_ed")
-new_names <- c( "hosp_capacity_nonsurge")
-scale <- "county"
-names(indicator_vars) <- new_names
-
-
-indicators_raw <- read.csv("~/CA_COVID_Forecasting_Accuracy/data/hosp_capacity.csv")
-
-indicators <- indicators_raw %>% 
-  mutate( date= as_date(date)) %>%
-  spread( c("variable"), c("value")) %>%  
-  filter( date >= analysis_start_date & date <= go_report_date) %>%
-  arrange( location, date)%>%
-  select( -classification, -location_level )%>%
-  rename(!!indicator_vars) %>%
-  rename(county = location)
+indicators <- read.csv("data/hosp_capacity.csv")
 
 hosp_capacity_all<-indicators %>% group_by(county) %>% summarize(hosp_capacity = median(hosp_capacity_nonsurge, na.rm = T)) %>% rename(County.Name=county)
 
@@ -186,6 +169,11 @@ score_cards_tourney <- ae_table %>% left_join(hosp_capacity_all, by="County.Name
 ```
 
 ```{r save-output}
-save_path<-"~/CA_COVID_Forecasting_Accuracy/results"
+save_path<-"results"
 write_csv(score_cards_tourney, file.path(save_path, "score_cards_2021Jan1_2022Feb1_allMAE_baseline.csv" ))
+```
+
+## Print session info
+```{r}
+print(sessionInfo(),	locale	= TRUE)
 ```
