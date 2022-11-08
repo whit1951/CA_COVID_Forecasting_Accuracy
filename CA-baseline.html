@@ -175,15 +175,16 @@ pre code {
 <li><a href="#load-actual-hospitalization-data">Load actual hospitalization data</a></li>
 <li><a href="#create-baseline-model">Create baseline model</a></li>
 <li><a href="#save-baseline-output">Save baseline output</a></li>
+<li><a href="#print-session-info">Print session info</a></li>
 </ul>
 </div>
 
 <div id="load-actual-hospitalization-data" class="section level2">
 <h2>Load actual hospitalization data</h2>
-<pre class="r"><code>regions &lt;- fread(&quot;~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv&quot;)
+<pre class="r"><code>regions &lt;- fread(&quot;data/CAregions.csv&quot;)
 
 ## Observed data
-act_raw &lt;- fread(&quot;~/CA_COVID_Forecasting_Accuracy/data/COVID_hospital_census.csv&quot;)
+act_raw &lt;- fread(&quot;data/COVID_hospital_census.csv&quot;)
 
 actuals &lt;- act_raw %&gt;% 
   mutate( index = mdy( Most.Recent.Date), model= &quot;ACTUALS&quot;) %&gt;% rename(county=County.Name) %&gt;% left_join(regions, by= &quot;county&quot;) %&gt;%
@@ -203,9 +204,54 @@ calcathosp_baseline&lt;-baseline %&gt;% rename(county=County.Name) %&gt;% left_j
 </div>
 <div id="save-baseline-output" class="section level2">
 <h2>Save baseline output</h2>
-<pre class="r"><code>save_path&lt;-&quot;~/CA_COVID_Forecasting_Accuracy/results&quot;
+<pre class="r"><code>save_path&lt;-&quot;results&quot;
 write_csv(baseline, file.path(save_path, &quot;baseline.csv&quot; ))
 write_csv(calcathosp_baseline, file.path(save_path, &quot;calcathosp_baseline.csv&quot; ))</code></pre>
+</div>
+<div id="print-session-info" class="section level2">
+<h2>Print session info</h2>
+<pre class="r"><code>print(sessionInfo(),    locale  = TRUE)</code></pre>
+<pre><code>## R version 3.6.0 (2019-04-26)
+## Platform: x86_64-redhat-linux-gnu (64-bit)
+## Running under: Red Hat Enterprise Linux Server 7.7 (Maipo)
+## 
+## Matrix products: default
+## BLAS/LAPACK: /usr/lib64/R/lib/libRblas.so
+## 
+## locale:
+##  [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C              
+##  [3] LC_TIME=en_US.UTF-8        LC_COLLATE=en_US.UTF-8    
+##  [5] LC_MONETARY=en_US.UTF-8    LC_MESSAGES=en_US.UTF-8   
+##  [7] LC_PAPER=en_US.UTF-8       LC_NAME=C                 
+##  [9] LC_ADDRESS=C               LC_TELEPHONE=C            
+## [11] LC_MEASUREMENT=en_US.UTF-8 LC_IDENTIFICATION=C       
+## 
+## attached base packages:
+## [1] grid      stats     graphics  grDevices utils     datasets  methods  
+## [8] base     
+## 
+## other attached packages:
+##  [1] scales_1.1.1      rmarkdown_2.11    gridExtra_2.3     ggthemes_4.2.0   
+##  [5] data.table_1.12.8 knitr_1.28        roll_1.1.6        lubridate_1.7.4  
+##  [9] forcats_0.4.0     stringr_1.4.0     dplyr_1.0.9       purrr_0.3.4      
+## [13] readr_2.1.2       tidyr_1.2.0       tibble_3.1.7      ggplot2_3.3.5    
+## [17] tidyverse_1.3.0  
+## 
+## loaded via a namespace (and not attached):
+##  [1] Rcpp_1.0.4.6       lattice_0.20-38    zoo_1.8-3          assertthat_0.2.1  
+##  [5] digest_0.6.25      utf8_1.1.4         R6_2.4.1           cellranger_1.1.0  
+##  [9] backports_1.1.7    reprex_0.3.0       evaluate_0.14      httr_1.4.1        
+## [13] pillar_1.7.0       rlang_1.0.2        readxl_1.3.1       rstudioapi_0.13   
+## [17] jquerylib_0.1.4    blob_1.2.0         bit_1.1-14         munsell_0.5.0     
+## [21] broom_0.8.0        compiler_3.6.0     modelr_0.1.5       xfun_0.28         
+## [25] pkgconfig_2.0.3    htmltools_0.4.0    tidyselect_1.1.2   fansi_0.4.1       
+## [29] crayon_1.3.4       tzdb_0.3.0         dbplyr_1.4.4       withr_2.2.0       
+## [33] jsonlite_1.6.1     gtable_0.3.0       lifecycle_1.0.1    DBI_1.1.0         
+## [37] magrittr_1.5       RcppParallel_5.0.1 vroom_1.5.7        cli_3.3.0         
+## [41] stringi_1.4.6      fs_1.3.2           xml2_1.3.2         ellipsis_0.3.2    
+## [45] generics_0.1.2     vctrs_0.4.1        tools_3.6.0        bit64_0.9-7       
+## [49] glue_1.6.2         hms_0.5.3          parallel_3.6.0     yaml_2.2.1        
+## [53] colorspace_1.4-1   rvest_0.3.5        haven_2.2.0</code></pre>
 </div>
 
 

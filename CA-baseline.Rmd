@@ -40,10 +40,10 @@ analysis_end_date<-go_report_date-window_end #last prediction day
 ## Load actual hospitalization data
 
 ```{r load-data}
-regions <- fread("~/CA_COVID_Forecasting_Accuracy/data/CAregions.csv")
+regions <- fread("data/CAregions.csv")
 
 ## Observed data
-act_raw <- fread("~/CA_COVID_Forecasting_Accuracy/data/COVID_hospital_census.csv")
+act_raw <- fread("data/COVID_hospital_census.csv")
 
 actuals <- act_raw %>% 
   mutate( index = mdy( Most.Recent.Date), model= "ACTUALS") %>% rename(county=County.Name) %>% left_join(regions, by= "county") %>%
@@ -67,9 +67,14 @@ calcathosp_baseline<-baseline %>% rename(county=County.Name) %>% left_join(regio
 ## Save baseline output
 
 ```{r}
-save_path<-"~/CA_COVID_Forecasting_Accuracy/results"
+save_path<-"results"
 write_csv(baseline, file.path(save_path, "baseline.csv" ))
 write_csv(calcathosp_baseline, file.path(save_path, "calcathosp_baseline.csv" ))
 
+```
+
+## Print session info
+```{r}
+print(sessionInfo(),	locale	= TRUE)
 ```
 
