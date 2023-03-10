@@ -170,6 +170,16 @@ scale_fill_manual(name = "Health Officer Regions", values= region_col)+
 
 cowplot::plot_grid(col_one, D, labels=c("", "D"), ncol=2, rel_widths=c(2, 1))
 
+#Save Figure 1
+pdf(file = "figures/fig1.pdf",  
+    width = 6.69, # The width of the plot in inches
+    height = 8) # The height of the plot in inches
+
+print(cowplot::plot_grid(col_one, D, labels=c("", "D"), ncol=2, rel_widths=c(1.8,1)))
+
+dev.off()
+
+# cowplot::ggsave2("figures/fig1.pdf", width=6.69, height=7)
 ```
 
 ## Import and Clean Socio-Economic Data Sets
@@ -210,6 +220,15 @@ reff_change <- bind_rows(lapply(reff_dates, function(t){
 
 ```
 
+```{r compare_R_vax}
+#Visualize reff_curves for one county from each of the health officer regions
+reff_curve_cnty %>% rename(County=county) %>% filter(index> as.Date("2021-02-01"), index< as.Date("2022-02-01"), County %in% c("Contra Costa", "Butte", "Fresno", "Del Norte", "Los Angeles")) %>% ggplot()+ geom_line(aes(x=index, y=estimate, col=County))+ geom_hline(yintercept=1, lty="dashed")+ xlab("Date")+ ylab("R-effective Estimate") + theme_classic()+
+geom_rect(data = variant_dates, aes(xmin = start_date, xmax = end_date, fill = variant_period), ymin = -Inf, ymax = Inf, alpha = 0.3)+  scale_fill_manual(name="Analysis\nPeriod", labels=variant_labels[names(variant_cols) %in% unique(variant_dates$variant_period)], values=variant_cols[names(variant_cols) %in% unique(variant_dates$variant_period)])
+
+#Visualize vaccination coverage curves for one county from each of the health officer regions
+vx %>% rename(County=county) %>% filter(index> as.Date("2021-02-01"), index< as.Date("2022-02-01"), County %in% c("Contra Costa", "Butte", "Fresno", "Del Norte", "Los Angeles")) %>% ggplot()+ geom_line(aes(x=index, y=perc_COVIDvx*100, col=County)) + xlab("Date")+ ylab("Vaccination Coverage (%)") + theme_classic()+
+geom_rect(data = variant_dates, aes(xmin = start_date, xmax = end_date, fill = variant_period), ymin = -Inf, ymax = Inf, alpha = 0.3)+  scale_fill_manual(name="Analysis\nPeriod", labels=variant_labels[names(variant_cols) %in% unique(variant_dates$variant_period)], values=variant_cols[names(variant_cols) %in% unique(variant_dates$variant_period)])
+```
 ## 7 days
 
 ### Score model performance using fractional ranking
@@ -328,7 +347,7 @@ MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~.)+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())
 
 col2<- cowplot::plot_grid(MAE_map_alpha, MAE_rankings_alpha, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
 cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
@@ -406,7 +425,7 @@ MAE_rankings_delta<-delta_ranks %>% left_join(regions, by= "county") %>%  group_
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~.)+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())
 
 
 col2<- cowplot::plot_grid(MAE_map_delta, MAE_rankings_delta, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
@@ -484,7 +503,7 @@ MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  gr
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~., scale="free")+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ 
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ 
   guides(fill="none")+ 
   theme(strip.text = element_blank())
 
@@ -691,7 +710,7 @@ scale_fill_manual(name = "Model", labels=gglabels_MAE[names(MAE_map_col) %in% un
 
 
 MAE_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=model))+
-  geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
+  geom_tile(color="white", size=0.001) + facet_grid(region_acronym~. , scale= "free")+
   scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(alpha_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(alpha_daily_winner$model)] )+
   scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
   ylab("County")+
@@ -714,7 +733,7 @@ MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~.)+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())
 
 
 #cowplot::plot_grid(MAE_map, MAE_hist, ncol=2, axis = "l")
@@ -722,7 +741,17 @@ MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_
 # cowplot::plot_grid(map28, day28_hist, ncol=2, axis = "l")
 
 col2<- cowplot::plot_grid(MAE_map_alpha, MAE_rankings_alpha, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
-cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.4,1))
+
+#Save Figure 2
+pdf(file = "figures/fig2.pdf",  
+    width = 6.69, # The width of the plot in inches
+    height = 6.5) # The height of the plot in inches
+
+cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.4,1))
+
+dev.off()
+
 
 alpha_winner %>% ungroup() %>% count(model) %>% kable
 alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
@@ -797,11 +826,21 @@ MAE_rankings_delta<-delta_ranks %>% left_join(regions, by= "county") %>%  group_
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~.)+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())
 
 
 col2<- cowplot::plot_grid(MAE_map_delta, MAE_rankings_delta, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
-cowplot::plot_grid(MAE_heatmap_delta, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+cowplot::plot_grid(MAE_heatmap_delta, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.4,1))
+
+#Save Figure 3
+pdf(file = "figures/fig3.pdf",  
+    width = 6.69, # The width of the plot in inches
+    height = 6.5) # The height of the plot in inches
+
+cowplot::plot_grid(MAE_heatmap_delta, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.4,1))
+
+dev.off()
+
 
 delta_winner %>% ungroup() %>% count(model) %>% kable
 delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
@@ -856,7 +895,7 @@ MAE_heatmap_omicron<-omicron_daily_winner %>% left_join(regions, by= "county") %
   scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_daily_winner$model)] )+
   scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
   ylab("County")+
-  guides(fill=guide_legend(title.position="left", nrow=1))+
+  guides(fill=guide_legend(title.position="left", nrow=2))+
   theme_classic()+ 
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
 
@@ -875,7 +914,7 @@ MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  gr
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~., scale="free")+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ 
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ 
   guides(fill="none")+ 
   theme(strip.text = element_blank())
 
@@ -885,8 +924,17 @@ MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  gr
 # cowplot::plot_grid(MAE_map_omicron, MAE_hist, ncol=2, axis = "l")
 
 col2<- cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
-cowplot::plot_grid(MAE_heatmap_omicron, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
+cowplot::plot_grid(MAE_heatmap_omicron, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.4,1))
 
+
+#Save Figure 4
+pdf(file = "figures/fig4.pdf",  
+    width = 6.69, # The width of the plot in inches
+    height = 6.5) # The height of the plot in inches
+
+cowplot::plot_grid(MAE_heatmap_omicron, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.4,1))
+
+dev.off()
 
 # cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, col2, ncol=3, labels=c("A", "B", ""), axis = "l", rel_widths = c(1,1, .5))
 
@@ -1043,6 +1091,7 @@ mutate(normalized_score=fraction_rank/(model_count)) %>% filter(normalized_score
 ```
 
 ### Alpha period: Plot maps of best performing models by county 
+Supplementary Figure 16
 
 ```{r, fig.height=12}
 
@@ -1108,7 +1157,7 @@ MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~.)+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())
 
 col2<- cowplot::plot_grid(MAE_map_alpha, MAE_rankings_alpha, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
 cowplot::plot_grid(MAE_heatmap_alpha, col2, ncol=2, labels=c("A", ""), axis = "l", rel_widths = c(2.5,1))
@@ -1121,6 +1170,7 @@ alpha_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
 
 
 ### Whole Delta period: Plot maps of best performing models by county for 
+Supplementary Figure 17
 
 ```{r}
 
@@ -1186,7 +1236,7 @@ MAE_rankings_delta<-delta_ranks %>% left_join(regions, by= "county") %>%  group_
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~.)+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ guides(fill="none")+ theme(strip.text = element_blank())
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())
 
 
 col2<- cowplot::plot_grid(MAE_map_delta, MAE_rankings_delta, labels=c("B", "C"), ncol=1, align="hv", axis = "l")
@@ -1201,7 +1251,7 @@ delta_ranks %>% left_join(regions, by= "county") %>%  group_by(forecaster) %>%
 
 
 ### Omicron: Plot maps of best performing models by count
-
+Supplementary Figure 18
 ```{r}
 MAE_map_omicron<-omicron_winner %>% left_join(county_fips, by="county") %>%
   left_join(urbnmapr::counties, by = "county_fips") %>% 
@@ -1245,7 +1295,7 @@ MAE_heatmap_omicron<-omicron_daily_winner %>% left_join(regions, by= "county") %
   scale_fill_manual(name = "Model:", labels=gglabels_MAE[names(MAE_map_col) %in% unique(omicron_daily_winner$model)], values=MAE_map_col[names(MAE_map_col) %in% unique(omicron_daily_winner$model)] )+
   scale_x_date(date_breaks = "7 days", date_labels = "%b %d", name="Publication Date")+
   ylab("County")+
-  guides(fill=guide_legend(title.position="left", nrow=1))+
+  guides(fill=guide_legend(title.position="left", nrow=2))+
   theme_classic()+ 
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
 
@@ -1264,7 +1314,7 @@ MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  gr
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~., scale="free")+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Density")+ 
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ 
   guides(fill="none")+ 
   theme(strip.text = element_blank())
 
