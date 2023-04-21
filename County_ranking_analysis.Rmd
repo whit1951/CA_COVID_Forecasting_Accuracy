@@ -44,12 +44,17 @@ registerDoParallel(cores=8)
 ## Load regions and spatial FIPS
 ```{r load-regions}
 #load health officer regions
-healthofficer_shortname <- tribble(~region_acronym, ~region_long, ~ region_full,
-  "ABAHO",      "Association of Bay Area Health Officers (ABAHO)",  "Association of Bay Area Health Officers (ABAHO)",    
+healthofficer_shortname <- tribble(~region_acronym, ~region_long, ~ region_full, ~region_line_break,
+  "ABAHO",      "Association of Bay Area Health Officers (ABAHO)",  "Association of Bay Area Health Officers (ABAHO)",
+   "Association of Bay Area\nHealth Officers (ABAHO)",
   "GSRHO",      "Greater Sacramento Region Health Officers", "Greater Sacramento Region Health Officers (GSRHO)",
+  "Greater Sacramento Region\nHealth Officers (GSRHO)",
   "RANCHO",     "Rural Association of Northern California Health Officers (RANCHO)", "Rural Association of Northern California Health Officers (RANCHO)",
+  "Rural Association of Northern\nCalifornia Health\nOfficers (RANCHO)",
   "SJVC",       "San Joaquin Valley Consortium (SJVC)", "San Joaquin Valley Consortium (SJVC)",
-  "SCAL",       "Southern California Health Officers", "Southern California Health Officers (SCAL)"
+  "San Joaquin Valley Consortium\n(SJVC)",
+  "SCAL",       "Southern California Health Officers", "Southern California Health Officers (SCAL)",
+  "Southern California\nHealth Officers (SCAL)"
 )
 
  regions <- read_csv("data/CAregions.csv") %>% 
@@ -76,7 +81,7 @@ forecaster_map_col<-viridis_pal()(6)
 names(forecaster_map_col) <- c("Columbia", "COVID Nearterm", "Ensemble", "LEMMA", "Simple Growth", "CA-baseline")
 
 region_col<- met.brewer("Hokusai1", 5)
-names(region_col)<-c("Association of Bay Area Health Officers (ABAHO)", "Greater Sacramento Region Health Officers (GSRHO)", "Rural Association of Northern California Health Officers (RANCHO)", "San Joaquin Valley Consortium (SJVC)", "Southern California Health Officers (SCAL)")   
+names(region_col)<-c("Association of Bay Area\nHealth Officers (ABAHO)", "Greater Sacramento Region\nHealth Officers (GSRHO)", "Rural Association of Northern\nCalifornia Health\nOfficers (RANCHO)", "San Joaquin Valley Consortium\n(SJVC)", "Southern California\nHealth Officers (SCAL)")   
                      
 region_col_abr<- met.brewer("Hokusai1", 5)
 names(region_col_abr)<-c("ABAHO", "GSRHO", "RANCHO", "SJVC", "SCAL") 
@@ -118,7 +123,7 @@ actuals <- fread("data/COVID_hospital_census.csv") %>%  mutate(index = mdy( Most
 
 actuals_state<- actuals %>% group_by( index ) %>% summarize(hospitalized= sum(hospitalized, na.rm=TRUE))
 
-A<-actuals_state %>% filter(index> as.Date("2021-02-01"), index<as.Date("2022-02-01")) %>% ggplot() + geom_line(aes(x=index, y=hospitalized)) + theme_classic()+ xlab("Date")+ ylab("Hospitalization Census")+ 
+A<-actuals_state %>% filter(index> as.Date("2021-02-01"), index<as.Date("2022-02-01")) %>% ggplot() + geom_line(aes(x=index, y=hospitalized)) + theme_classic()+ xlab("Date")+ ylab("Hospital Census")+ 
    geom_rect(aes(xmin = start_date, xmax = end_date, fill = variant_period), 
     ymin = -Inf, ymax = Inf, alpha = 0.3, 
     data = variant_dates)+ 
@@ -150,7 +155,7 @@ col_one<- cowplot::plot_grid(A, B, C, labels="AUTO", ncol=1, align="hv", axis="l
 D<- regions %>% left_join(county_fips, by="county") %>%
   left_join(urbnmapr::counties, by = "county_fips") %>% 
   filter(state_name =="California") %>% 
-  ggplot(mapping = aes(long, lat, group = group, fill = region_full)) +
+  ggplot(mapping = aes(long, lat, group = group, fill = region_line_break)) +
   geom_polygon(color = "#ffffff", size = .25) +
 scale_fill_manual(name = "Health Officer Regions", values= region_col)+
   coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
@@ -172,8 +177,8 @@ cowplot::plot_grid(col_one, D, labels=c("", "D"), ncol=2, rel_widths=c(2, 1))
 
 #Save Figure 1
 pdf(file = "figures/fig1.pdf",  
-    width = 6.69, # The width of the plot in inches
-    height = 8) # The height of the plot in inches
+    width = 6.69, # The width of the plot in inches, 170 mm=6.69"
+    height = 6) # The height of the plot in inches, 225 mm=8.85"
 
 print(cowplot::plot_grid(col_one, D, labels=c("", "D"), ncol=2, rel_widths=c(1.8,1)))
 
@@ -716,7 +721,8 @@ MAE_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% g
   ylab("County")+
   labs(fill = "Model:") +
   theme_classic()+ 
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+  #axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+  theme(axis.text.y = element_text(size=8), legend.position = "top")#+  ggtitle("Best daily performing model by county as measured by MAE")
 
 participants_heatmap_alpha<-alpha_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
   geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
@@ -733,7 +739,8 @@ MAE_rankings_alpha<-alpha_ranks %>% left_join(regions, by= "county") %>%  group_
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
   facet_grid(forecaster ~.)+
-  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())
+  scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(alpha_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ guides(fill="none")+ theme(strip.text = element_blank())+
+  scale_y_continuous(breaks=c(0, 2, 4))
 
 
 #cowplot::plot_grid(MAE_map, MAE_hist, ncol=2, axis = "l")
@@ -809,7 +816,7 @@ MAE_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% g
   ylab("County")+
   labs(fill = "Model:") +
   theme_classic()+ 
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+  theme(axis.text.y = element_text(size=8), legend.position = "top")#+  ggtitle("Best daily performing model by county as measured by MAE")
 
 participants_heatmap_delta<-delta_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
   geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
@@ -897,7 +904,7 @@ MAE_heatmap_omicron<-omicron_daily_winner %>% left_join(regions, by= "county") %
   ylab("County")+
   guides(fill=guide_legend(title.position="left", nrow=2))+
   theme_classic()+ 
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_text(size=8), legend.position = "bottom")#+  ggtitle("Best daily performing model by county as measured by MAE")
+ theme(axis.text.y = element_text(size=8), legend.position = "top")#+  ggtitle("Best daily performing model by county as measured by MAE")
 
 participants_heatmap_omicron <-omicron_daily_winner %>% left_join(regions, by= "county") %>% ggplot(aes(y=as.factor(county), x=as.Date(index),  fill=as.factor(models_per_day)))+
   geom_tile(color="white", size=0.1) + facet_grid(region_acronym~. , scale= "free")+
@@ -913,10 +920,11 @@ MAE_rankings_omicron<-omicron_ranks %>% left_join(regions, by= "county") %>%  gr
   mutate(med = median(fraction_rank, na.rm=TRUE), avg= mean(fraction_rank, na.rm=TRUE)) %>% ggplot(aes(x=fraction_rank, fill=as.factor(forecaster))) + geom_density() + 
   geom_vline(aes(xintercept = med, group = forecaster), colour = 'black', lty="dashed")+ 
   geom_vline(aes(xintercept = avg, group = forecaster), colour = 'black', lty="solid")+ 
-  facet_grid(forecaster ~., scale="free")+
+  facet_grid(forecaster ~., scale="fixed")+
   scale_fill_manual(name = "Model:", labels=names(forecaster_map_col)[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)], values=forecaster_map_col[names(forecaster_map_col) %in% unique(omicron_ranks$forecaster)] ) + theme_classic()+ xlab("Fractional Ranking")+ ylab("Frequency")+ 
   guides(fill="none")+ 
-  theme(strip.text = element_blank())
+  theme(strip.text = element_blank())+
+  scale_y_continuous(breaks=c(0, 1, 2))
 
 # row1<-cowplot::plot_grid(participants_heatmap_omicron, MAE_heatmap_omicron, labels=c("A", "B"), ncol=2, align="hv", axis = "tb")
 # row2<-cowplot::plot_grid(MAE_map_omicron, MAE_rankings_omicron, labels=c("C", "D"), ncol=2, align="hv", axis = "l")

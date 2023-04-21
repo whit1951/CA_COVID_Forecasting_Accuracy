@@ -737,7 +737,7 @@ county_rankings<-do.call(rbind.data.frame, gg_county_rankings) %>% left_join(reg
 
 overall_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra", "Alpine")) %>% mutate(log_ranks = log(ranks, base= 10)) %>% ggplot(aes(x = factor(forecaster, levels = ranked_list), y=as.factor(county))) +
   geom_tile(aes(fill = log_ranks)) + facet_grid(region_acronym ~ ., scale= "free")+
-  geom_text(aes(label = round(ranks, 2)), size=2) +
+  geom_text(aes(label = round(ranks, 2)), size=2.5) +
   scale_fill_gradient2("",
     low = "#2166ac",
     mid = "#f7f7f7",
@@ -750,7 +750,7 @@ overall_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra"
   theme_classic() +
   guides(fill="none")+
   theme(axis.ticks.y = element_blank(),
-    axis.text.y = element_text(size=7),
+    axis.text.y = element_text(size=8),
     axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
     plot.margin = unit(c(5.5, 5.5, 5.5, 55.5), "pt"))
 
@@ -759,13 +759,13 @@ overall_counties<-county_rankings %>% filter(county %notin% c("Sutter", "Sierra"
 #### Panel figure overall period
 
 ```{r}
-overall_col<-cowplot::plot_grid(A_overall, B_overall, NULL, labels=c("A", "B", ""), ncol=1, rel_heights = c(1,2.5,0.5))
+overall_col<-cowplot::plot_grid(A_overall, B_overall, NULL, labels=c("A", "B", ""), ncol=1, rel_heights = c(1,2.25,0.75))
 cowplot::plot_grid(overall_col, overall_counties, labels=c("", "C"), ncol=2, rel_widths=c(1.2, 1))
 
 #Save Figure 5
 pdf(file = "figures/fig5.pdf",  
     width = 6.69, # The width of the plot in inches
-    height = 6) # The height of the plot in inches
+    height = 8.85) # The height of the plot in inches
 
 cowplot::plot_grid(overall_col, overall_counties, labels=c("", "C"), ncol=2, rel_widths=c(1, 1.1))
 
