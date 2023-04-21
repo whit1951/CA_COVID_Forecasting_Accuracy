@@ -1,5 +1,8 @@
 # CA COVID-19 Forecasting Accuracy
+
 Repository that contains code for evaluation of California county level COVID-19 forecasts for the manuscript: "Assessing the accuracy of California county level COVID-19 hospitalization forecasts to inform public policy decision making" *BMC Public Health*
+
+[![DOI](https://zenodo.org/badge/557528158.svg)](https://zenodo.org/badge/latestdoi/557528158)
 
 Pre-print: https://www.medrxiv.org/content/10.1101/2022.11.08.22282086v1
 
